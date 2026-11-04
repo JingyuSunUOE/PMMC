@@ -30,26 +30,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_DATASETS_CACHE=/opt/pmmc-home/.cache/huggingface/datasets \
     TORCH_HOME=/opt/pmmc-home/.cache/torch
 
+# CUDA is already pinned by FROM. The OS tools and PostgreSQL client do not
+# require any third-party repository inherited from the runtime image.
 RUN set -eux; \
-    if [ -f /etc/apt/sources.list ]; then \
-        sed -i \
-            -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-            -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
-            /etc/apt/sources.list; \
-    fi; \
-    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-        sed -i \
-            -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-            -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
-            /etc/apt/sources.list.d/ubuntu.sources; \
-    fi; \
-    apt-get \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::Timeout=30 \
-        -o Acquire::https::Timeout=30 \
-        -o APT::Update::Error-Mode=any \
-        update \
-    && apt-get install -y --no-install-recommends \
+    . /etc/os-release; test "$ID" = ubuntu; \
+    install -d /tmp/pmmc-apt/sources; \
+    printf 'deb https://archive.ubuntu.com/ubuntu %s main universe\n' \
+        "$VERSION_CODENAME" "$VERSION_CODENAME-updates" > /tmp/pmmc-apt/ubuntu.list; \
+    printf 'deb https://security.ubuntu.com/ubuntu %s-security main universe\n' \
+        "$VERSION_CODENAME" >> /tmp/pmmc-apt/ubuntu.list; \
+    apt_os() { apt-get -o Dir::Etc::sourcelist=/tmp/pmmc-apt/ubuntu.list \
+        -o Dir::Etc::sourceparts=/tmp/pmmc-apt/sources -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 -o APT::Update::Error-Mode=any "$@"; }; \
+    apt_os update \
+    && apt_os install -y --no-install-recommends \
         build-essential \
         ca-certificates \
         curl \
@@ -63,18 +57,12 @@ RUN set -eux; \
     && install -d -m 0755 /usr/share/postgresql-common/pgdg \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    && . /etc/os-release \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get \
-        -o Acquire::Retries=5 \
-        -o Acquire::http::Timeout=30 \
-        -o Acquire::https::Timeout=30 \
-        -o APT::Update::Error-Mode=any \
-        update \
-    && apt-get install -y --no-install-recommends \
+        > /tmp/pmmc-apt/sources/pgdg.list \
+    && apt_os update \
+    && apt_os install -y --no-install-recommends \
         "postgresql-client-${POSTGRES_CLIENT_MAJOR}" \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/* /tmp/pmmc-apt \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && python3 --version \
     && python --version
