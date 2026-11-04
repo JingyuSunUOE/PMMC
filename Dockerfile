@@ -98,7 +98,10 @@ COPY docker/lock_constraints.py ./docker/lock_constraints.py
 COPY docker/verify_pip_check.py ./docker/verify_pip_check.py
 COPY docker/verify_runtime_versions.py ./docker/verify_runtime_versions.py
 COPY docker/verify_source_contracts.py ./docker/verify_source_contracts.py
-RUN python3 docker/lock_constraints.py uv.lock > /tmp/pmmc-constraints.txt \
+# The release does not use the optional LMCache KV connector or the upstream
+# OTel Prometheus exporter; both constrain the application stack incompatibly.
+RUN python3 -m pip uninstall -y lmcache opentelemetry-exporter-prometheus \
+    && python3 docker/lock_constraints.py uv.lock > /tmp/pmmc-constraints.txt \
     && python3 -m pip install -c /tmp/pmmc-constraints.txt . \
     && python3 -m pip install --force-reinstall --no-deps \
         "nixl-cu13==${VLLM_NIXL_VERSION}" \

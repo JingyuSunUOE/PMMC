@@ -58,6 +58,42 @@ def _kernel_source(stage):
     return scientific_source_fingerprint(get_settings().project_root, stage)
 
 
+def _verify_compiler_references(lineage):
+    from pmmc.experiments.release_compiler_reuse import verify_reference_lineage
+
+    try:
+        verify_reference_lineage(lineage)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DependencyUnproven("pmmc_compiler_reference_unproven") from exc
+
+
+async def _kernel_receipt_lineage(read, compiler_run, query_run=None):
+    from pmmc.infrastructure.database import step8_models as sm
+
+    output = sm.BenchmarkComponentReceiptModel.payload["output"]
+    predicates = [output["compiler_run_id"].as_string() == compiler_run]
+    if query_run is not None:
+        predicates.append(output["query_executor_run_id"].as_string() == query_run)
+    receipts = await read(sm.BenchmarkComponentReceiptModel, or_(*predicates))
+    by_job = _unique(receipts, "job_id")
+    jobs = await read(
+        sm.BenchmarkStageJobModel, sm.BenchmarkStageJobModel.job_id.in_(tuple(by_job))
+    )
+    if {j["job_id"] for j in jobs} != set(by_job):
+        raise DependencyUnproven("pmmc_kernel_receipt_owner_missing")
+    campaigns = _unique(
+        await read(
+            sm.BenchmarkCampaignModel,
+            sm.BenchmarkCampaignModel.campaign_id.in_({j["campaign_id"] for j in jobs}),
+        ),
+        "campaign_id",
+    )
+    return [
+        {"campaign": campaigns[j["campaign_id"]], "job": j, "receipt": by_job[j["job_id"]]}
+        for j in jobs
+    ]
+
+
 def _validate_kernel_lineage(lineage, trace, program):
     from pmmc.experiments.step8_jobs import BenchmarkStageJob, ComponentReceipt
     from pmmc.schemas.step8 import BenchmarkCampaignManifest
@@ -72,6 +108,7 @@ def _validate_kernel_lineage(lineage, trace, program):
     owner_key = "query_executor_run_id" if stage == "execution" else "compiler_run_id"
     owner_id = trace["run_id"] if stage == "execution" else program["run_id"]
     roots = []
+    _verify_compiler_references(lineage)
     for entry in lineage:
         owner, row, stored = entry["campaign"], entry["job"], entry["receipt"]
         campaign = BenchmarkCampaignManifest.model_validate(owner["payload"])
@@ -102,6 +139,10 @@ def _validate_kernel_lineage(lineage, trace, program):
             or stored["artifact_hashes"] != receipt.artifact_hashes
         ):
             raise DependencyUnproven("pmmc_execution_producer_kernel_unproven")
+        if "compiler_producer_reference" in receipt.output:
+            # Already checked against the unique committed physical chain above.
+            # A consumption receipt contributes no second production or model call.
+            continue
         actual_source = _kernel_source(stage)
         if job.source_fingerprint != actual_source:
             # A later approved patch retains exact receipts, including their older proofs.
@@ -377,6 +418,7 @@ def validate_write_graph(facts) -> dict[int, set[str]]:
 
     compiler, rows = facts["compiler"], facts["rows"]
     run, snapshot = compiler["run_id"], compiler["snapshot_id"]
+    _verify_compiler_references(facts["kernel_lineage"])
     if (
         facts["state"]["run_id"] != run
         or facts["state"]["status"] != "completed"
@@ -597,7 +639,6 @@ async def collect_pmmc_cost_dependencies(
     from pmmc.infrastructure.database import doubter_models as dm
     from pmmc.infrastructure.database import experiment_models as xm
     from pmmc.infrastructure.database import models as bm
-    from pmmc.infrastructure.database import step8_models as sm
     from pmmc.infrastructure.database.repositories import PostgresMemoryRepository
     from pmmc.infrastructure.database.step8_upstream_import import (
         QUESTIONER_TABLES,
@@ -622,33 +663,6 @@ async def collect_pmmc_cost_dependencies(
     @asynccontextmanager
     async def borrowed():
         yield session
-
-    async def lineage(run):
-        receipts = await read(
-            sm.BenchmarkComponentReceiptModel,
-            or_(
-                sm.BenchmarkComponentReceiptModel.payload["output"]["compiler_run_id"].astext
-                == run,
-                sm.BenchmarkComponentReceiptModel.payload["output"]["query_executor_run_id"].astext
-                == run,
-            ),
-        )
-        jobs = await read(
-            sm.BenchmarkStageJobModel,
-            sm.BenchmarkStageJobModel.job_id.in_({r["job_id"] for r in receipts}),
-        )
-        campaigns = _unique(
-            await read(
-                sm.BenchmarkCampaignModel,
-                sm.BenchmarkCampaignModel.campaign_id.in_({j["campaign_id"] for j in jobs}),
-            ),
-            "campaign_id",
-        )
-        by_job = _unique(receipts, "job_id")
-        return [
-            {"campaign": campaigns[j["campaign_id"]], "job": j, "receipt": by_job[j["job_id"]]}
-            for j in jobs
-        ]
 
     async def imports(run, compiler):
         nonlocal r0_dependencies
@@ -749,7 +763,7 @@ async def collect_pmmc_cost_dependencies(
                             "questioner_config"
                         ].get("memory_raw_image_policy", "allow"),
                         "kernel_contract": kernel_contract(),
-                        "kernel_lineage": await lineage(run),
+                        "kernel_lineage": await _kernel_receipt_lineage(read, run),
                         "r0_imports": await imports(run, compiler),
                     }
                 )
@@ -819,7 +833,9 @@ async def collect_pmmc_cost_dependencies(
                             == identity,
                         ),
                         "kernel_contract": kernel_contract(),
-                        "kernel_lineage": await lineage(execution["run_id"]),
+                        "kernel_lineage": await _kernel_receipt_lineage(
+                            read, compiler_id, execution["run_id"]
+                        ),
                     }
                 )
                 if (execution.get("metadata") or {}).get("r0_prefix_import"):

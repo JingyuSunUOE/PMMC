@@ -433,6 +433,12 @@ SOURCE_OWNERS = {
                     else ()
                 )
                 + _DATABASE_COMMON
+                + (
+                    ("experiments/release_compiler_reuse.py",
+                     "experiments/step8_backend.py::ProductionComponentBackend.execute",
+                     "experiments/step8_backend.py::ProductionComponentBackend.verify_recovery")
+                    if "_compiler" in _BACKEND_METHODS[stage] else ()
+                )
                 + tuple(
                     "experiments/step8_backend.py::ProductionComponentBackend." + method
                     for method in ("__init__", *_BACKEND_METHODS[stage])

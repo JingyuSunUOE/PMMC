@@ -239,7 +239,13 @@ class ProductionComponentBackend:
         from pmmc.runtime.grounding import step8_prompt_scope
 
         with step8_prompt_scope(self.settings.project_root):
-            result = await handler(job, scope)
+            # An import-only scheduler subclass can replace _compiler. A completed
+            # exploration producer still takes precedence over prefix adoption.
+            result = None
+            if job.operation == "compiler" and type(self)._compiler is not ProductionComponentBackend._compiler:
+                result = await self._completed_compiler_reference(job, scope)
+            if result is None:
+                result = await handler(job, scope)
         if is_dataclass(result) and not isinstance(result, type):
             result = asdict(result)
         if not isinstance(result, dict):
@@ -248,6 +254,8 @@ class ProductionComponentBackend:
         payload = json.loads(json.dumps(result))
         digest = self.store.put_json(payload)
         artifact_hashes = [digest]
+        if "compiler_producer_reference" in payload:
+            artifact_hashes.extend(payload["compiler_producer_reference"]["producer_artifacts"])
         if "questioner_import_proof_sha256" in payload:
             artifact_hashes.append(payload["questioner_import_proof_sha256"])
         if "questioner_adoption" in payload:
@@ -259,6 +267,29 @@ class ProductionComponentBackend:
         if "partial_prefix_adoption" in payload:
             artifact_hashes.append(payload["partial_prefix_adoption"]["source_proof_sha256"])
         return payload, list(dict.fromkeys(artifact_hashes)), {"component_outputs": 1}
+
+    async def _completed_compiler_reference(self, job, scope):
+        if self.campaign.phase.value != "exploration" or self.campaign.diagnostic_only:
+            return None
+        from pmmc.experiments.release_compiler_reuse import reuse_completed
+
+        return await reuse_completed(self, job, scope)
+
+    async def verify_recovery(self, job, upstream, receipt) -> None:
+        """Recovery must not convert an uncommitted disk reference into authority."""
+        if self.campaign.phase.value != "exploration" or job.operation not in ("compiler", "adopt_questioner"):
+            return
+        from pmmc.experiments.release_compiler_reuse import REFERENCE, output_hash
+
+        expected = await self._completed_compiler_reference(job, dict(job.parameters))
+        if expected is None:
+            if REFERENCE in receipt.output:
+                raise ValueError("exploration_compiler_reference_producer_missing_on_recovery")
+            return
+        if (expected != receipt.output or receipt.upstream_receipt_hashes != upstream
+                or receipt.row_counts != {"component_outputs": 1}
+                or set(receipt.artifact_hashes) != {output_hash(expected), *expected[REFERENCE]["producer_artifacts"]}):
+            raise ValueError("exploration_compiler_reference_receipt_changed_on_recovery")
 
     async def _snapshot(self, job: BenchmarkStageJob, scope: dict[str, Any]) -> dict[str, Any]:
         from pmmc.experiments.step8_snapshot import prepare_campaign_snapshot, snapshot_event
@@ -382,6 +413,9 @@ class ProductionComponentBackend:
         }
 
     async def _compiler(self, job: BenchmarkStageJob, scope: dict[str, Any]) -> dict[str, Any]:
+        reference = await self._completed_compiler_reference(job, scope)
+        if reference is not None:
+            return reference
         from pmmc.experiments.step8_partial_import import partial_stage
 
         imported = await partial_stage(self, job, scope)
@@ -559,6 +593,9 @@ class ProductionComponentBackend:
     ) -> dict[str, Any]:
         if scope.get("treatment") != "fixed_planner":
             raise ValueError("questioner_controlled_adoption_requires_fixed_planner")
+        reference = await self._completed_compiler_reference(job, scope)
+        if reference is not None:
+            return reference
         from pmmc.experiments.step8_partial_import import partial_stage
 
         imported = await partial_stage(self, job, scope)

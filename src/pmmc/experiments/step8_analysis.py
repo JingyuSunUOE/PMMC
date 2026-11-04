@@ -103,6 +103,7 @@ def analysis_source_hashes() -> dict[str, str]:
         "experiments/step8_questioner_cost_dependencies.py",
         "experiments/step8_r0_cost_dependencies.py",
         "experiments/step8_pmmc_cost_dependencies.py",
+        "experiments/release_compiler_reuse.py",
         "experiments/step8_upstream_import.py",
         "infrastructure/database/step8_upstream_import.py",
         "experiments/step8_import_scheduler.py",
