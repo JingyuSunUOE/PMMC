@@ -35,6 +35,11 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Make room for the pinned CUDA image on the disposable GitHub VM
+        run: |
+          df -h /var/lib/docker
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/chromium /opt/hostedtoolcache
+          df -h /var/lib/docker
       - name: Build without any historical PMMC image or private inputs
         run: docker build -t pmmc-release-candidate .
       - name: Exercise offline scientific and recovery contracts

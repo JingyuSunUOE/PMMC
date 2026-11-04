@@ -80,9 +80,11 @@ RUN set -eux; \
     && python --version
 
 # Set these build args to match the operator's storage, if necessary.
-RUN groupadd --gid "${GROUP_ID}" usergroup \
-    && useradd --no-log-init --create-home \
-        --home-dir /opt/pmmc-home --uid "${USER_ID}" --gid "${GROUP_ID}" pmmc
+RUN set -eu; test "${USER_ID}" -gt 0; test "${GROUP_ID}" -gt 0; \
+    getent group "${GROUP_ID}" >/dev/null || groupadd --gid "${GROUP_ID}" pmmc-group; \
+    getent passwd "${USER_ID}" >/dev/null || useradd --no-log-init --no-create-home \
+        --home-dir /opt/pmmc-home --uid "${USER_ID}" --gid "${GROUP_ID}" pmmc; \
+    install -d -m 0750 -o "${USER_ID}" -g "${GROUP_ID}" /opt/pmmc-home
 
 WORKDIR /workspace
 
@@ -128,7 +130,7 @@ RUN python3 docker/verify_source_contracts.py /workspace/src \
     && mkdir -p artifacts outputs runs \
     && chown "${USER_ID}:${GROUP_ID}" /workspace artifacts outputs runs
 
-USER pmmc
+USER ${USER_ID}:${GROUP_ID}
 
 ENTRYPOINT ["tini", "--"]
 CMD ["python3", "-m", "pmmc", "--help"]
