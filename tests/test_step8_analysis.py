@@ -532,7 +532,7 @@ def test_absent_typed_answer_is_engineering_missing_even_with_a_score(tmp_path):
 def test_produced_thresholds_analyze_refusal_missing_cas_and_private_ids(tmp_path, monkeypatch):
     from pmmc.evaluation.paper_statistics import SelectedQuery, StatisticsConfig
     from pmmc.experiments.step8_analysis import _threshold_scans
-    from test_step8_inventory import produce_thresholds, threshold_fixture
+    from step8_threshold_fixtures import produce_thresholds, threshold_fixture
 
     case = threshold_fixture(tmp_path, monkeypatch)
     produced = produce_thresholds(case)
@@ -564,6 +564,7 @@ def test_produced_thresholds_analyze_refusal_missing_cas_and_private_ids(tmp_pat
         if r["axis"].endswith("relevance") and r["thresholds"] != [0.3]
     )
     row = next(r for r in produced["rows"] if r["score"]["answer_source_method"] == "pmmc")
+    assert row["score"]["status"] == "abstention" and row["score"]["value"] == 0
     context = case.store.load_json(row["context_sha256"])
     proof = next(iter(context["answer_proof"]["calls"].values()))
     case.store.verify(proof["output_sha256"]).write_bytes(b"corrupt CAS payload")
@@ -637,7 +638,7 @@ def test_joint_policy_requires_verified_v3_and_complete_coverage(tmp_path, monke
     from pmmc.evaluation.paper_statistics import SelectedQuery, StatisticsConfig
     from pmmc.experiments import step8_inventory as inv
     from pmmc.experiments.step8_analysis import _threshold_scans
-    from test_step8_relevance_proofs import relevance_fixture
+    from step8_threshold_fixtures import relevance_fixture
 
     case = relevance_fixture(tmp_path, monkeypatch)
     policy = case.manifest.protocol.model_copy(update={"text_relevance_threshold": 0.1})
@@ -705,7 +706,7 @@ def test_threshold_proof_reader_is_scoped_and_deduplicates_reads(tmp_path, monke
     from pmmc.evaluation.paper_statistics import SelectedQuery, StatisticsConfig
     from pmmc.experiments import step8_analysis as analysis
     from pmmc.experiments.step8_artifacts import SnapshotArtifactReader
-    from test_step8_inventory import produce_thresholds, threshold_fixture
+    from step8_threshold_fixtures import produce_thresholds, threshold_fixture
 
     case = threshold_fixture(tmp_path, monkeypatch)
     produce_thresholds(case)

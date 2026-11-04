@@ -704,6 +704,7 @@ src/pmmc/infrastructure/database/**
 !tests/conftest.py
 !tests/step8_fixture_approval.py
 !tests/step8_model_fixtures.py
+!tests/step8_threshold_fixtures.py
 !tests/test_private_deploy.py
 !tests/test_questioner_release_w.py
 !tests/test_questioner_v3.py
@@ -731,10 +732,14 @@ src/pmmc/infrastructure/database/**
 !tests/test_step8_analysis.py
 !tests/test_step8_answer_contract.py
 !tests/test_step8_campaign.py
+!tests/test_step8_compiler_revision.py
 !tests/test_step8_cost_analysis.py
 !tests/test_step8_cost_dependencies.py
+!tests/test_step8_database_contracts.py
 !tests/test_step8_instances.py
 !tests/test_step8_journal_storage.py
+!tests/test_step8_model_journal.py
+!tests/test_step8_operator_runtime.py
 !tests/test_step8_pmmc_cost_dependencies.py
 !tests/test_step8_providers.py
 !tests/test_step8_query_backbone_context.py

@@ -147,16 +147,8 @@ jobs:
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "$APP:$TAG" "$RUNNER_TEMP/source"
-      - name: Exercise offline scientific and recovery contracts
-        run: >-
-          docker run --rm --network none "$APP:$TAG" python -m pytest -q
-          tests/test_questioner_release_w.py tests/test_release_r_joint_relevance.py
-          tests/test_release_inputs.py tests/test_release_reporting.py
-          tests/test_step8_campaign.py tests/test_step8_journal_storage.py
-          tests/test_step8_typed_gold.py
-          tests/test_release_selected_dag.py tests/test_release_data.py
-          tests/test_release_plan_budget.py tests/test_release_plan_controller.py
-          tests/test_release_runtime_topology.py
+      - name: Exercise the complete public offline test suite in the candidate image
+        run: docker run --rm --network none "$APP:$TAG" python -m pytest -q --tb=short tests
       - name: Authenticate to GHCR for explicit publication only
         if: inputs.publish_images
         env:

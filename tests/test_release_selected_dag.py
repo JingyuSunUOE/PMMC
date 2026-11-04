@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import json
+import shutil
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,6 +25,7 @@ from pmmc.infrastructure.database.step8_evaluation_scope import (
     _v2_definition,
     scoped_completion_function,
 )
+from pmmc.infrastructure.settings import Settings
 from pmmc.release_plan import normalize_plan, plan_hash
 from pmmc.schemas.base import DatasetName
 from pmmc.schemas.step8 import (
@@ -181,6 +183,11 @@ def test_worker_rechecks_immutable_request_and_exact_scope(tmp_path, monkeypatch
 
 def test_completed_open_baseline_seals_without_legacy_stage_or_budget(tmp_path, monkeypatch):
     request, selection, jobs = selected(tmp_path, stage="baselines", methods=["caption_text_rag"])
+    settings = Settings(_env_file=None, project_root=tmp_path)
+    config = load_benchmark_config(tmp_path / "manifests/config.json")
+    profile = settings.resolve_path(config.runtime_profile)
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / config.runtime_profile, profile)
     rows = [dict(job=j.model_dump(mode="json"), job_id=j.job_id, status="completed") for j in jobs]
     monkeypatch.delenv("PMMC_STEP8_BUDGET_APPROVAL_ID", raising=False)
     monkeypatch.setattr(release_execution, "_register", AsyncMock(return_value=(None, {})))
@@ -203,9 +210,7 @@ def test_completed_open_baseline_seals_without_legacy_stage_or_budget(tmp_path, 
             plan_hash=plan_hash(request),
         ),
     )
-    report = release_execution.execute_stage(
-        SimpleNamespace(resolve_path=lambda _: tmp_path), tmp_path, "baselines", "control"
-    )
+    report = release_execution.execute_stage(settings, tmp_path, "baselines", "control")
     seal = json.loads((tmp_path / "reports/seal-baselines.json").read_bytes())
     assert report["state"] == "stage_complete" and not report["paid_authorized"]
     assert report["scoped_jobs"] == len(jobs) == report["completed"]

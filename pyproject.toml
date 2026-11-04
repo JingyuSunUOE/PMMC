@@ -131,7 +131,7 @@ disallow_untyped_defs = false
 no_implicit_optional = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests/test_release_*.py", "tests/test_questioner_release_w.py", "tests/test_step8_campaign.py", "tests/test_step8_journal_storage.py", "tests/test_step8_typed_gold.py"]
+testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
 markers = [
