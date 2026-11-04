@@ -224,7 +224,7 @@ def stage_model_entry_hashes(
             aliases += (GROUNDING_ALIAS,)
     elif operation in {"baseline_grounding", "query_grounding", "native_fallback_ground"}:
         aliases = (_answer_alias(scope), GROUNDING_ALIAS)
-    elif operation in {"evaluate", "primary_evaluate", "analysis_evaluate"}:
+    elif operation in {"evaluate", "primary_evaluate", "analysis_evaluate", "baseline_evaluate"}:
         aliases = (JUDGE_ALIAS,)
         if (
             protocol.oracle_at_50 is not None

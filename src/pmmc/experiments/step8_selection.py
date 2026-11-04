@@ -62,6 +62,8 @@ def denominator_report(
     result = {}
     for dataset in (DatasetName.MEMLENS, DatasetName.MEMGALLERY):
         rows = [item for item in assignments if item.dataset is dataset]
+        if not rows:
+            continue  # No denominator exists for an unselected benchmark.
         paper = {item.query_id for item in rows if item.role is PartitionRole.PAPER_TEST}
         result[dataset.value] = {
             "eligible_total": len(rows),
@@ -95,6 +97,8 @@ def select_benchmark_queries(
     seed: int = 0,
     previous: SelectionExpansionManifest | None = None,
     additional_exposed_ids: Mapping[DatasetName, Sequence[str]] | None = None,
+    datasets: Sequence[DatasetName] = (DatasetName.MEMLENS, DatasetName.MEMGALLERY),
+    release_plan_hash: str | None = None,
 ) -> SelectionExpansionManifest:
     if exposure.partition_hash != partition_hash:
         raise ValueError("exposure and partition identities differ")
@@ -129,7 +133,7 @@ def select_benchmark_queries(
     added: dict[DatasetName, list[str]] = {}
     counts: dict[DatasetName, dict[str, int]] = {}
     eligible_counts: dict[DatasetName, int] = {}
-    for dataset in (DatasetName.MEMLENS, DatasetName.MEMGALLERY):
+    for dataset in datasets:
         population = [item for item in assignments if item.dataset is dataset and item.role is role]
         eligible_counts[dataset] = len(population)
         lookup = {item.query_id: item for item in population}
@@ -217,4 +221,5 @@ def select_benchmark_queries(
         stratum_counts=counts,
         eligible_counts=eligible_counts,
         parent_selection_hash=previous.content_hash if previous else None,
+        release_plan_hash=release_plan_hash,
     )

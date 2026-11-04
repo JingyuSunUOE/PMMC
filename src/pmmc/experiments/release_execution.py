@@ -27,19 +27,46 @@ from pmmc.infrastructure.settings import Settings
 from pmmc.schemas.step8 import CampaignPhase, ResourceClass
 
 
-async def selection_spend(settings, approval_id, campaign_id, selection_hash):
+async def selection_spend(settings, approval_id, campaign_id, selection_hash, *,
+                          plan_hash=None, scope_hash=None):
     from pmmc.experiments.step8_conformance_replacement import read_ledger
+    from pmmc.release_plan import plan_from_environment
+    from pmmc.release_plan import plan_hash as hash_plan
 
     engine, sessions = create_session_factory(settings, DatabaseRole.RUNTIME)
     try:
         approval, rows = await read_ledger(sessions, approval_id)
     finally:
         await engine.dispose()
-    if (approval["campaign_id"], approval["selection_hash"]) != (campaign_id, selection_hash):
+    plan = plan_from_environment(os.environ)
+    if plan is not None:
+        if plan_hash is not None and plan_hash != hash_plan(plan):
+            raise ValueError("exploration_ledger_identity_mismatch")
+        plan_hash = hash_plan(plan)
+    if approval.get("plan_hash") != plan_hash:
         raise ValueError("exploration_ledger_identity_mismatch")
+    if plan_hash is None:
+        if scope_hash is not None or (approval["campaign_id"], approval["selection_hash"]) != (
+                campaign_id, selection_hash):
+            raise ValueError("exploration_ledger_identity_mismatch")
+    elif not any((member["campaign_id"], member["selection_hash"]) == (campaign_id, selection_hash)
+                 and (scope_hash is None or scope_hash in member["scopes"].values())
+                 for member in approval["plan_bindings"].values()):
+        raise ValueError("exploration_ledger_identity_mismatch")
+    limit = approval["limit_usd"]
+    used = approval["settled_usd"] + approval["reserved_usd"]
     return {
-        "scope": "selection_cumulative_not_additive_across_stages",
-        "limit_usd": str(approval["limit_usd"]),
+        "scope": ("plan_cumulative_not_additive_across_stages_or_variants" if plan_hash
+                  else "selection_cumulative_not_additive_across_stages"),
+        "approval_id": approval_id,
+        "plan_hash": plan_hash,
+        "budget_mode": "uncapped" if limit is None else "finite",
+        "limit_usd": str(limit) if limit is not None else None,
+        "remaining_usd": str(limit - used) if limit is not None else None,
+        "new_calls_stopped": approval.get("stopped_at") is not None,
+        "stopped_at": approval["stopped_at"].isoformat() if approval.get("stopped_at") else None,
+        "stopped_by": approval.get("stopped_by"),
+        "stop_reason": approval.get("stop_reason"),
         "settled_usd": str(approval["settled_usd"]),
         "reserved_usd": str(approval["reserved_usd"]),
         "request_states": dict(Counter(r["state"] for r in rows)),
@@ -83,8 +110,20 @@ def execute_stage(settings: Settings, directory: Path, stage: ReleaseStage,
     rows = asyncio.run(_snapshot(settings, manifest.campaign_id))
     jobs = [BenchmarkStageJob.model_validate(r["job"]) for r in rows]
     statuses = {row["job_id"]: row["status"] for row in rows}
-    require_preceding_stage(jobs, statuses, stage)
-    pending_paid = approval is None
+    request = config.release_request
+    if request is None:
+        require_preceding_stage(jobs, statuses, stage)
+    else:
+        from pmmc.release_plan import plan_hash
+
+        if manifest.release_plan_hash != plan_hash(request) or selection.release_plan_hash != manifest.release_plan_hash:
+            raise ValueError("release_stage_request_identity_mismatch")
+        if not all(job.release_stages for job in jobs):
+            raise ValueError("release_stage_requires_selected_native_inventory")
+    full_scope = stage_job_ids(jobs, stage, paid=True)
+    pending_paid = approval is None and (request is None or any(
+        job.job_id in full_scope and job.resource_class == ResourceClass.API
+        and statuses[job.job_id] != "completed" for job in jobs))
     scope = publish_scope(directory, manifest.campaign_id, selection.content_hash, stage,
                           jobs, paid=not pending_paid)
     card = (directory / "manifests" / f"rate-card-{selection.content_hash}.json"
@@ -122,6 +161,12 @@ def execute_stage(settings: Settings, directory: Path, stage: ReleaseStage,
         metrics = summarize_release_campaign(directory, jobs=observed, scope=stage)
         if approval:
             metrics["selection_ledger"] = asyncio.run(selection_spend(
-                settings, approval, manifest.campaign_id, selection.content_hash))
+                settings, approval, manifest.campaign_id, selection.content_hash,
+                plan_hash=manifest.release_plan_hash,
+                scope_hash=scope[0] if request is not None else None))
         write_json(directory / "reports" / f"exploration-{stage}.json", metrics)
+        if state == "stage_complete":
+            from pmmc.experiments.release_readouts import seal_report
+
+            seal_report(directory, stage, metrics, report)
     return report

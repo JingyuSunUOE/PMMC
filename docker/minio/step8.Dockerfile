@@ -1,18 +1,15 @@
 # syntax=docker/dockerfile:1.7
-# Build context: repository root. Supply the verified Step8 application image.
+# Independent context: docker/minio. Supply the candidate application digest.
 ARG PMMC_IMAGE
-ARG PMMC_MC_IMAGE=quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+ARG PMMC_MC_IMAGE=docker.io/l33tlamer/minio-backup@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
 FROM ${PMMC_MC_IMAGE} AS mc
 FROM ${PMMC_IMAGE} AS iam-tools-readable
 ARG PMMC_MC_SOURCE=/usr/bin/mc
 COPY --chmod=0555 --from=mc ${PMMC_MC_SOURCE} /usr/local/bin/mc
 
 FROM iam-tools-readable AS iam
-ARG PMMC_MC_SHA256
-COPY --chmod=0555 docker/minio/step8_iam.py /opt/pmmc-step8/step8_iam.py
-RUN if [ -n "${PMMC_MC_SHA256}" ]; then \
-        printf '%s  /usr/local/bin/mc\n' "${PMMC_MC_SHA256}" | sha256sum -c -; \
-    fi \
+COPY --chmod=0555 step8_iam.py /opt/pmmc-step8/step8_iam.py
+RUN printf '%s  /usr/local/bin/mc\n' ac90da87a35641be5a0ac75d49de5161ddb47d629b5ba01261b0ae9e00aea15f | sha256sum -c - \
     && python /workspace/docker/verify_source_contracts.py /workspace/src \
     && python /workspace/docker/verify_step8_source_contracts.py /workspace --runtime \
     && python -c "import runpy; runpy.run_path('/opt/pmmc-step8/step8_iam.py', run_name='build_check')" \

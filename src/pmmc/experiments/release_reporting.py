@@ -267,7 +267,7 @@ def _scores(
     if (
         report.get("campaign_id") != job.campaign_id
         or report.get("query_id") != p["query_id"]
-        or report.get("method_scope") != _METHOD_SCOPE[scope]
+        or report.get("method_scope") != ("baseline" if job.operation == "baseline_evaluate" else _METHOD_SCOPE[scope])
         or report.get("status") != "complete"
         or report.get("selected_query", {}).get("dataset") != p["dataset"]
         or report.get("selected_query", {}).get("query_id") != p["query_id"]
@@ -275,6 +275,11 @@ def _scores(
         raise ValueError("exploration evaluator scope mismatch")
     rows = report["scores"]
     scores = {s["cell_id"]: s for s in rows}
+    if job.operation == "baseline_evaluate" and (
+        len(scores) != 1 or rows[0].get("method") != p["method"] or not report.get("baseline_run_id")
+        or report.get("query_executor_run_id") is not None
+    ):
+        raise ValueError("standalone evaluator did not bind its selected child")
     if len(rows) != len(scores) or len(rows) != report["selected_cell_count"]:
         raise ValueError("exploration evaluator cell denominator mismatch")
     return scores
@@ -320,6 +325,7 @@ def _evidence(
         "typed_score": score.get("value"),
         "judge_score": score.get("judge_value"),
         "query_run_id": report.get("query_executor_run_id"),
+        **({"baseline_run_id": report["baseline_run_id"]} if report.get("baseline_run_id") else {}),
         "source_fact_hash": score.get("source_fact_hash"),
         "typed_answer_id": score.get("typed_answer_id"),
         "answer_source_method": score.get("answer_source_method"),
@@ -391,17 +397,21 @@ def summarize_release_campaign(
     receipts = _receipts(campaign_dir, snapshot)
     manifest, selection = snapshot.manifest, snapshot.selection
     config = Step8BenchmarkConfig.model_validate_json(_read(campaign_dir, "manifests/config.json"))
-    matrix = build_experiment_matrix(manifest.protocol)
+    request = config.release_request
+    standalone = request is not None and scope == "baselines"
+    matrix = build_experiment_matrix(manifest.protocol, request,
+                                     variant=str(config.metadata.get("exploration_variant", "wr")))
     if canonical_content_hash([c.model_dump(mode="json") for c in matrix]) != manifest.matrix_hash:
         raise ValueError("exploration matrix identity mismatch")
     targets = {}
     scores = {}
     for k in sorted(snapshot.scoped):
         job = snapshot.jobs[k]
-        if job.operation != TARGET_OPERATIONS[scope]:
+        if job.operation != ("baseline_evaluate" if standalone else TARGET_OPERATIONS[scope]):
             continue
         p = job.parameters
-        key = (p["dataset"], p["answer_model"], p["query_id"], p["treatment"])
+        key = (p["dataset"], p["answer_model"], p["query_id"], p["treatment"],
+               p.get("method") if standalone else None)
         if (
             key in targets
             or p["query_id"] not in selection.query_ids.get(p["dataset"], [])
@@ -422,10 +432,15 @@ def summarize_release_campaign(
     groups = []
     for dataset, ids in sorted(selection.query_ids.items()):
         for model in manifest.protocol.answer_backbones:
+            if request and model not in request["models"]:
+                continue
             cells = [
                 c
                 for c in matrix
                 if c.dataset == dataset and c.answer_model == model and _reported_cell(c, scope)
+                and (not standalone or c.method in request["methods"])
+                and (request is None or not request["components"]
+                     or bool({"score", "seal"} & set(request["components"])))
             ]
             observations = []
             by_query: dict[str, set[str]] = defaultdict(set)
@@ -437,7 +452,10 @@ def summarize_release_campaign(
                 process_values: dict[str, list[float]] = defaultdict(list)
                 reasons: Counter[str] = Counter()
                 for q in ids:
-                    target = targets.get((dataset.value, model, q, cell.treatment.value))
+                    target = targets.get((dataset.value, model, q, cell.treatment.value,
+                                          cell.method if standalone else None))
+                    if request is not None and target is None:
+                        raise ValueError("selected evaluation target missing")
                     state = snapshot.status(target) if target is not None else "not_planned"
                     counts[state] += 1
                     by_query[q].add(state)
@@ -494,6 +512,7 @@ def summarize_release_campaign(
                     }
                 )
             states = Counter(
+                "not_requested" if not cells else
                 "not_planned" if "not_planned" in by_query[q] else _group_status(by_query[q])
                 for q in ids
             )
@@ -517,7 +536,9 @@ def summarize_release_campaign(
     protocol = manifest.protocol
     return {
         **snapshot.header(scope),
-        "schema": "v0.1-exploration-readout-v1",
+        "schema": "release-selected-readout-v2" if request else "v0.1-exploration-readout-v1",
+        **({"release": "v0.2", "plan_hash": manifest.release_plan_hash,
+            "release_request": request} if request else {}),
         "groups": groups,
         "exploration_variant": config.metadata.get("exploration_variant"),
         "exploration_run_id": config.metadata.get("exploration_run_id"),
@@ -609,8 +630,9 @@ def _reviewed_rates(
         raise ValueError("pricing review must identify this card and frozen registry")
     registry = load_model_registry(registry_path)
     rates = load_rate_card(rate_card)
+    plan = config.release_request
     preflight = preflight_provider_rate_card(
-        rate_card, registry, manifest.protocol.answer_backbones
+        rate_card, registry, plan["models"] if plan else manifest.protocol.answer_backbones
     )
     if (
         rates.sha256 != review.rate_card_sha256
@@ -619,11 +641,12 @@ def _reviewed_rates(
     ):
         raise ValueError("a reviewed, hash-matching provider rate card is required")
     models = {m["provider_model"] for m in preflight["models"]}
-    if not models or any(
+    if (not models and plan is None) or any(
         not any(rates.card.models[model].model_dump().values()) for model in models
     ):
         raise ValueError("release API work needs positive reviewed rates")
-    if set(review.pricing_sources) != models or any(
+    reviewed = set(rates.card.models) if plan else models
+    if set(review.pricing_sources) != reviewed or any(
         url.scheme != "https" or url.username or url.password
         for url in review.pricing_sources.values()
     ):
@@ -639,8 +662,27 @@ def _contexts(job: BenchmarkStageJob) -> int:
     if job.operation == "native_fallback_generate":
         return 1
     if job.operation == "baseline_answer":
+        if job.release_stages:
+            return 1  # One selected standalone method or the PMMC native fallback.
         return 1 if job.parameters.get("treatment") == "no_raw_image" else len(BASELINE_METHODS)
     raise ValueError(f"no reviewed paid-call bound for operation {job.operation}")
+
+
+def _plan_paid_stages(plan: dict, variant: str) -> set[str]:
+    # Analysis reads sealed reports. Only explicit dependency execution can spend.
+    stage = plan["stage"]
+    if stage == "analysis":
+        if not plan["with_deps"]:
+            return set()
+        return {"main", "analysis"} if variant == "wr" and "ablation" in plan["analyses"] else {"main"}
+    if stage != "all":
+        return {stage}
+    if variant != "wr":
+        return {"main"}
+    stages = {"main", "baselines"}
+    if "ablation" in plan["analyses"]:
+        stages.add("analysis")
+    return stages
 
 
 def _unit_prices(rates, entry) -> Row:
@@ -702,9 +744,18 @@ def estimate_release_budget(
         campaign_dir, snapshot.manifest, rate_card, project_root
     )
     preceding: set[str] = set()
+    config = Step8BenchmarkConfig.model_validate_json(_read(campaign_dir, "manifests/config.json"))
+    plan = config.release_request
+    plan_stages = _plan_paid_stages(plan, config.metadata["exploration_variant"]) if plan else None
+    if plan_stages is not None and scope not in plan_stages:
+        raise ValueError("release_quote_stage_outside_plan")
+    if plan is not None and not all(job.release_stages for job in snapshot.jobs.values()):
+        raise ValueError("release_quote_requires_native_scoped_inventory")
     for stage in _STAGE_ORDER:
         if stage == scope:
             break
+        if plan_stages is not None and stage not in plan_stages:
+            continue
         preceding.update(stage_job_ids(snapshot.jobs.values(), stage, paid=True))
     counts: Counter[tuple[str, str, str, int, bool]] = Counter()
     api_states: Counter[str] = Counter()
@@ -759,9 +810,21 @@ def estimate_release_budget(
             "one_pass_reservation_bound_usd": str(pair[1]) if registered else None,
         }
 
+    identity = {}
+    if plan is not None:
+        from pmmc.experiments.release_scope import publish_scope
+        from pmmc.release_plan import plan_hash
+
+        scope_hash, scoped = publish_scope(campaign_dir, snapshot.manifest.campaign_id,
+                                           snapshot.selection.content_hash, scope,
+                                           list(snapshot.jobs.values()), paid=True)
+        if scoped != snapshot.scoped:
+            raise ValueError("release_quote_scope_mismatch")
+        identity = {"scope_hash": scope_hash, "plan_hash": plan_hash(plan)}
     return {
         **snapshot.header(scope),
-        "schema": "v0.1-pending-api-estimate-v1",
+        **identity,
+        "schema": "release-stage-api-estimate-v2" if plan else "v0.1-pending-api-estimate-v1",
         "rate_card_sha256": rates.sha256,
         "review": _REVIEW_FILE,
         "review_sha256": review_hash,
@@ -786,6 +849,226 @@ def estimate_release_budget(
     }
 
 
+def _campaign_plan(campaign_dir: Path) -> dict | None:
+    import os
+
+    from pmmc.release_plan import plan_from_environment, plan_hash
+
+    manifest, selection = _identity(campaign_dir)
+    config = Step8BenchmarkConfig.model_validate_json(_read(campaign_dir, "manifests/config.json"))
+    plan = config.release_request
+    expected = plan_from_environment(os.environ)
+    digest = plan_hash(plan) if plan else None
+    if (
+        (expected is not None and expected != plan)
+        or manifest.release_plan_hash != digest
+        or selection.release_plan_hash != digest
+    ):
+        raise ValueError("release_budget_plan_selection_mismatch")
+    return plan
+
+
+def verify_release_budget_pointer(settings, *, run_id: str, variant: str, stage: ReleaseStage,
+                                  approval_id: str | None, rate_card_path: Path | None = None) -> None:
+    """Read-only host preflight. Reconstruct the ledger ID without DB privileges."""
+    import os
+
+    from pmmc.experiments.release_inputs import exploration_campaign_directory
+    from pmmc.experiments.release_scope import read_scope
+    from pmmc.infrastructure.database.step8_repositories import validate_budget_policy
+    from pmmc.release_plan import plan_from_environment, plan_hash
+
+    plan = plan_from_environment(os.environ)
+    if not plan or plan["run_id"] != run_id or variant not in plan["variants"]:
+        raise ValueError("release_budget_pointer_requires_host_plan")
+    digest = plan_hash(plan)
+    directory = exploration_campaign_directory(settings, run_id, variant=variant)
+    if _campaign_plan(directory) != plan or stage not in _plan_paid_stages(plan, variant):
+        raise ValueError("release_budget_pointer_stage_outside_plan")
+    manifest, selection = _identity(directory)
+    if approval_id is None:
+        if (directory / f"manifests/budget-{selection.content_hash}.json").exists():
+            raise ValueError("explicit_release_budget_approval_required")
+        return
+    bindings, policy = {}, None
+    for arm in plan["variants"]:
+        child = directory if arm == variant else exploration_campaign_directory(settings, run_id, variant=arm)
+        cm, cs = (manifest, selection) if arm == variant else _identity(child)
+        receipt = json.loads(_read(child, f"manifests/budget-{cs.content_hash}.json"))
+        scopes = receipt["scope_hashes"]
+        if (_campaign_plan(child) != plan or receipt["plan_hash"] != digest
+                or receipt["approval_id"] != approval_id or receipt["campaign_id"] != cm.campaign_id
+                or receipt["selection_hash"] != cs.content_hash or set(scopes) != _plan_paid_stages(plan, arm)):
+            raise ValueError("release_budget_pointer_member_mismatch")
+        current = {k: receipt[k] for k in ("approver_id", "limit_usd", "rate_card_hash", "budget_mode")}
+        if policy is not None and current != policy:
+            raise ValueError("release_budget_pointer_policy_mismatch")
+        policy = current
+        bindings[arm] = dict(campaign_id=cm.campaign_id, selection_hash=cs.content_hash,
+                             scopes=scopes, review_sha256=receipt["review_sha256"])
+        if arm == variant:
+            card = _read(child, f"manifests/rate-card-{cs.content_hash}.json")
+            if (hashlib.sha256(card).hexdigest() != current["rate_card_hash"]
+                    or (rate_card_path and sha256_file(rate_card_path) != current["rate_card_hash"])):
+                raise ValueError("release_budget_pointer_rate_card_mismatch")
+            read_scope(child, scopes[stage], cm.campaign_id, cs.content_hash)
+            payload = json.loads(_read(child, f"private/scopes/{scopes[stage]}.json"))
+            if payload["stage"] != stage or payload["paid"] is not True:
+                raise ValueError("release_budget_pointer_scope_mismatch")
+    assert policy is not None
+    amount = Decimal(policy["limit_usd"]) if policy["limit_usd"] is not None else None
+    validate_budget_policy(amount, policy["budget_mode"] == "uncapped")
+    anchor = bindings[plan["variants"][0]]
+    expected = dict(campaign_id=anchor["campaign_id"], selection_hash=anchor["selection_hash"],
+                    plan_bindings=bindings, plan_hash=digest, approver_id=policy["approver_id"],
+                    rate_card_hash=policy["rate_card_hash"],
+                    limit_usd=format(amount.normalize(), "f") if amount is not None else None)
+    if policy["budget_mode"] not in {"uncapped", "finite"} or canonical_content_hash(expected) != approval_id:
+        raise ValueError("release_budget_pointer_approval_identity_mismatch")
+
+
+async def stop_release_budget(settings, campaign_dir: Path, *, approval_id: str,
+                              expected_plan_hash: str, selection_hash: str,
+                              operator_id: str, reason_code: str) -> Row:
+    from pmmc.infrastructure.database.constants import DatabaseRole
+    from pmmc.infrastructure.database.engine import create_session_factory
+    from pmmc.infrastructure.database.step8_repositories import PostgresBenchmarkRepository
+    from pmmc.release_plan import plan_hash
+
+    manifest, selection = _identity(campaign_dir)
+    plan = _campaign_plan(campaign_dir)
+    if not plan or plan_hash(plan) != expected_plan_hash or selection_hash != selection.content_hash:
+        raise ValueError("release_budget_stop_plan_or_selection_mismatch")
+    engine, sessions = create_session_factory(settings, DatabaseRole.RUNTIME)
+    try:
+        return await PostgresBenchmarkRepository(sessions).stop_plan_budget(
+            approval_id=approval_id, plan_hash=expected_plan_hash, campaign_id=manifest.campaign_id,
+            selection_hash=selection_hash, operator_id=operator_id, reason_code=reason_code)
+    finally:
+        await engine.dispose()
+
+
+async def quote_release_plan(
+    settings,
+    campaign_dir: Path,
+    *,
+    scope: ReleaseStage,
+    rate_card: Path,
+    prepare_missing: bool = False,
+) -> Row:
+    """Quote the exact materialized plan. No approvals, provider calls, or retries."""
+    from pmmc.experiments.release_inputs import exploration_campaign_directory
+    from pmmc.experiments.step8_cli import _register
+    from pmmc.experiments.step8_supervisor import _snapshot as db_snapshot
+    from pmmc.release_plan import plan_hash
+
+    manifest, selection = _identity(campaign_dir)
+    plan = _campaign_plan(campaign_dir)
+    if plan is None:
+        await _register(campaign_dir, budget=None, rate_card=None, approver=None, retry=False)
+        return estimate_release_budget(
+            campaign_dir,
+            jobs=await db_snapshot(settings, manifest.campaign_id),
+            scope=scope,
+            rate_card=rate_card,
+            project_root=settings.project_root,
+        )
+    bindings, estimates = {}, []
+    rates, _, review = _reviewed_rates(campaign_dir, manifest, rate_card, settings.project_root)
+    read_only = plan["stage"] == "analysis" and not plan["with_deps"]
+    anchor_variant = Step8BenchmarkConfig.model_validate_json(
+        _read(campaign_dir, "manifests/config.json")
+    ).metadata["exploration_variant"]
+    if scope != plan["stage"] and scope not in _plan_paid_stages(plan, anchor_variant):
+        raise ValueError("release_quote_stage_outside_plan")
+    for variant in plan["variants"]:
+        if read_only:
+            break
+        try:
+            directory = exploration_campaign_directory(settings, plan["run_id"], variant=variant)
+        except FileNotFoundError:
+            from pmmc.experiments.release_inputs import prepare_exploration
+
+            pointer = (
+                settings.outputs_path
+                / "step8/exploration"
+                / plan["run_id"]
+                / variant
+                / "pointer.json"
+            )
+            if not prepare_missing or pointer.exists():
+                raise
+            # Materialize only the explicitly selected child's CPU plan, never run workers.
+            prepare_exploration(settings, plan["run_id"], variant=variant)
+            directory = exploration_campaign_directory(settings, plan["run_id"], variant=variant)
+        child, selected = _identity(directory)
+        if _campaign_plan(directory) != plan:
+            raise ValueError("release_budget_child_plan_mismatch")
+        await _register(directory, budget=None, rate_card=None, approver=None, retry=False)
+        rows = await db_snapshot(settings, child.campaign_id)
+        inventory = json.loads(_read(directory, f"manifests/jobs-{selected.content_hash}.json"))
+        if {row["job_id"] for row in rows} != set(inventory):
+            raise ValueError("release_budget_incomplete_registered_inventory")
+        stages = {stage for row in rows for stage in row["job"].get("release_stages", ())}
+        allowed = _plan_paid_stages(plan, variant)
+        if not allowed <= stages or stages - set(_STAGE_ORDER):
+            raise ValueError("release_budget_child_missing_stage_inventory")
+        member = dict(
+            campaign_id=child.campaign_id,
+            selection_hash=selected.content_hash,
+            review_sha256=review,
+            scopes={},
+        )
+        for stage in _STAGE_ORDER:
+            if stage not in allowed:
+                continue
+            quote = estimate_release_budget(
+                directory,
+                jobs=rows,
+                scope=stage,
+                rate_card=rate_card,
+                project_root=settings.project_root,
+            )
+            member["scopes"][stage] = quote["scope_hash"]
+            estimates.append({"variant": variant, **quote})
+        bindings[variant] = member
+    if not read_only and not any(
+        (member["campaign_id"], member["selection_hash"])
+        == (manifest.campaign_id, selection.content_hash)
+        for member in bindings.values()
+    ):
+        raise ValueError("release_budget_anchor_not_in_plan")
+    reviews = {(q["rate_card_sha256"], q["review_sha256"]) for q in estimates}
+    if reviews and reviews != {(rates.sha256, review)}:
+        raise ValueError("release_budget_price_review_mismatch")
+    registered = all(q["complete_api_inventory_registered"] for q in estimates)
+    totals = {
+        key: str(
+            sum(Decimal(q["pending_additional_after_preceding_scopes"][key]) for q in estimates)
+        )
+        if registered
+        else None
+        for key in ("standard_rate_scenario_usd", "one_pass_reservation_bound_usd")
+    }
+    return dict(
+        schema="release-plan-api-estimate-v2",
+        scope=scope,
+        campaign_id=manifest.campaign_id,
+        selection_hash=selection.content_hash,
+        plan_hash=plan_hash(plan),
+        plan=plan,
+        plan_bindings=bindings,
+        rate_card_sha256=rates.sha256,
+        review_sha256=review,
+        complete_api_inventory_registered=registered,
+        approval_created=False,
+        pending_scope=totals,
+        pending_additional_after_preceding_scopes=totals,
+        read_only_analysis=read_only,
+        stages=estimates,
+    )
+
+
 async def approve_release_budget(
     campaign_dir: Path,
     *,
@@ -793,21 +1076,45 @@ async def approve_release_budget(
     rate_card: Path,
     project_root: Path,
     approver_id: str,
-    limit_usd: Decimal,
+    limit_usd: Decimal | None = None,
+    uncapped: bool = False,
     scope: ReleaseStage | None = None,
 ) -> Row:
     """Explicit opt-in only. Register this selection's limit; never start workers."""
-    from pmmc.experiments.step8_cli import _register
+    from pmmc.experiments.step8_cli import _publish_plan_budget, _register
+    from pmmc.infrastructure.database.step8_repositories import validate_budget_policy
 
     manifest, selection = _identity(campaign_dir)
     if selection_hash != selection.content_hash or not approver_id.strip():
         raise ValueError("explicit approver and exact exploration selection hash required")
-    if (
-        not limit_usd.is_finite()
-        or not 0 < limit_usd < 10**12
-        or limit_usd.quantize(_USD_QUANTUM) != limit_usd
-    ):
-        raise ValueError("explicit positive finite NUMERIC(20,8) limit required")
+    validate_budget_policy(limit_usd, uncapped)
+    if _campaign_plan(campaign_dir) is not None:
+        from pmmc.infrastructure.settings import get_settings
+
+        if scope not in TARGET_OPERATIONS:
+            raise ValueError("explicit saved plan quote required")
+        saved = json.loads(_read(campaign_dir, f"reports/budget-quote-{scope}.json"))
+        settings = get_settings()
+        fresh = await quote_release_plan(settings, campaign_dir, scope=scope, rate_card=rate_card)
+        for key in (
+            "schema",
+            "scope",
+            "plan_hash",
+            "plan",
+            "plan_bindings",
+            "campaign_id",
+            "selection_hash",
+            "review_sha256",
+            "rate_card_sha256",
+            "complete_api_inventory_registered",
+        ):
+            if saved.get(key) != fresh[key]:
+                raise ValueError("release_budget_saved_quote_identity_mismatch")
+        if not fresh["complete_api_inventory_registered"] or not fresh["plan_bindings"]:
+            raise ValueError("release_budget_incomplete_quote")
+        return await _publish_plan_budget(settings, fresh, rate_card, approver_id, limit_usd)
+    if limit_usd is None:
+        raise ValueError("uncapped approval requires an immutable release plan")
     rates, _, review_hash = _reviewed_rates(campaign_dir, manifest, rate_card, project_root)
     stages = [scope] if scope is not None else list(TARGET_OPERATIONS)
     if scope is not None and scope not in TARGET_OPERATIONS:

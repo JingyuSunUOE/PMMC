@@ -55,6 +55,7 @@ from pmmc.schemas import (
 from pmmc.schemas.answer_output import TYPED_ANSWER_CONTRACT_VERSION
 from pmmc.schemas.baseline_suite import (
     is_internal_pmmc_fallback_suite,
+    is_release_baseline_suite,
     is_step8_caption_fallback_suite,
 )
 
@@ -190,6 +191,7 @@ async def create_baseline_suite(
         and not paper_component
         and not internal_pmmc_fallback
         and not is_step8_caption_fallback_suite(selected_methods, suite_metadata)
+        and not is_release_baseline_suite(selected_methods, suite_metadata)
     ):
         raise ValueError("paper baseline suites require five methods or a bound component")
     if any(item in RAG_METHODS for item in selected_methods) and not corpus_id:

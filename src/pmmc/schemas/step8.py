@@ -18,7 +18,7 @@ from pmmc.compiler.ids import canonical_content_hash
 from pmmc.schemas.base import BaseSchema, DatasetName, JsonDict, NonEmptyStr, UtcDateTime
 
 STEP8_SCHEMA_VERSION: Literal["0.1.0"] = "0.1.0"
-STEP8_ALEMBIC_REVISION = "20261104_0037"
+STEP8_ALEMBIC_REVISION = "20261104_0038"
 # Read-only historical reports remain interpretable; new workers require the current schema.
 STEP8_READABLE_REVISIONS = frozenset({"20260927_0036", STEP8_ALEMBIC_REVISION})
 ANSWER_BACKBONES = (
@@ -315,7 +315,8 @@ class ExperimentCell(BaseSchema):
         )
 
 
-def build_experiment_matrix(protocol: ScientificProtocol) -> list[ExperimentCell]:
+def build_experiment_matrix(protocol: ScientificProtocol, request: dict | None = None,
+                            *, variant: str = "wr") -> list[ExperimentCell]:
     cells: dict[str, ExperimentCell] = {}
     for dataset in (DatasetName.MEMLENS, DatasetName.MEMGALLERY):
         for model in protocol.answer_backbones:
@@ -323,18 +324,18 @@ def build_experiment_matrix(protocol: ScientificProtocol) -> list[ExperimentCell
                 variants = (
                     ("active", "no_fallback", "forced_top1") if method == "pmmc" else ("active",)
                 )
-                for variant in variants:
+                for source_variant in variants:
                     cell = ExperimentCell(
                         protocol_hash=protocol.content_hash,
                         dataset=dataset,
                         answer_model=model,
                         method=method,
-                        source_variant=variant,
+                        source_variant=source_variant,
                     )
                     cells[cell.cell_id] = cell
         for budget in (1, 2, 4, 8):
             for round_id in range(4):
-                for variant in ("active", "no_fallback", "forced_top1"):
+                for source_variant in ("active", "no_fallback", "forced_top1"):
                     cell = ExperimentCell(
                         protocol_hash=protocol.content_hash,
                         dataset=dataset,
@@ -342,21 +343,37 @@ def build_experiment_matrix(protocol: ScientificProtocol) -> list[ExperimentCell
                         method="pmmc",
                         question_budget=budget,
                         round_id=round_id,
-                        source_variant=variant,
+                        source_variant=source_variant,
                     )
                     cells[cell.cell_id] = cell
         for treatment in (Treatment.FIXED_PLANNER, Treatment.NO_RAW_IMAGE, Treatment.NO_RERANKER):
-            for variant in ("active", "no_fallback", "forced_top1"):
+            for source_variant in ("active", "no_fallback", "forced_top1"):
                 cell = ExperimentCell(
                     protocol_hash=protocol.content_hash,
                     dataset=dataset,
                     answer_model=ANSWER_BACKBONES[0],
                     method="pmmc",
                     treatment=treatment,
-                    source_variant=variant,
+                    source_variant=source_variant,
                 )
                 cells[cell.cell_id] = cell
-    return sorted(cells.values(), key=lambda value: value.readable_name)
+    selected = cells.values()
+    if request is not None:
+        stage = request["stage"]
+        def included(cell: ExperimentCell) -> bool:
+            if cell.dataset.value not in request["benchmarks"] or cell.answer_model not in request["models"]:
+                return False
+            if cell.method != "pmmc":
+                return (variant == "wr" and stage in {"all", "baselines"}
+                        and cell.method in request["methods"])
+            if stage == "baselines":
+                return False
+            if variant == "wr" and stage in {"analysis", "all"} and "ablation" in request["analyses"]:
+                return True
+            return (cell.treatment == Treatment.MAIN and cell.source_variant == "active"
+                    and (cell.question_budget, cell.round_id) == (8, 2))
+        return sorted(filter(included, selected), key=lambda value: value.readable_name)
+    return sorted(selected, key=lambda value: value.readable_name)
 
 
 class CompiledQBankInstanceManifest(BaseSchema):
@@ -392,10 +409,24 @@ class SelectionExpansionManifest(BaseSchema):
     stratum_counts: dict[DatasetName, dict[str, int]]
     eligible_counts: dict[DatasetName, int]
     parent_selection_hash: str | None = None
+    release_plan_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def _optional_request(self, handler):
+        payload = handler(self)
+        if self.release_plan_hash is None:
+            payload.pop("release_plan_hash", None)
+        return payload
 
     @model_validator(mode="after")
     def _selected(self) -> SelectionExpansionManifest:
-        if set(self.query_ids) != {DatasetName.MEMLENS, DatasetName.MEMGALLERY}:
+        if self.release_plan_hash is not None:
+            if self.phase != CampaignPhase.EXPLORATION or not self.query_ids or any(
+                set(mapping) != set(self.query_ids)
+                for mapping in (self.added_query_ids, self.eligible_counts, self.stratum_counts)
+            ):
+                raise ValueError("invalid release selection denominator")
+        elif set(self.query_ids) != {DatasetName.MEMLENS, DatasetName.MEMGALLERY}:
             raise ValueError("both datasets must be represented")
         if (self.phase is CampaignPhase.PAPER) != (self.selection in {"5", "20", "100"}):
             raise ValueError("selection and campaign phase disagree")
@@ -431,10 +462,21 @@ class BenchmarkCampaignManifest(BaseSchema):
     protocol_freeze_hash: str | None = None
     paper_result: bool = False
     diagnostic_only: bool = False
+    release_plan_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def _optional_request(self, handler):
+        payload = handler(self)
+        if self.release_plan_hash is None:
+            payload.pop("release_plan_hash", None)
+        return payload
 
     @model_validator(mode="after")
     def _paper_gate(self) -> BenchmarkCampaignManifest:
-        if set(self.snapshot_ids) != {DatasetName.MEMLENS, DatasetName.MEMGALLERY}:
+        if self.release_plan_hash is not None:
+            if self.phase != CampaignPhase.EXPLORATION or not self.snapshot_ids:
+                raise ValueError("invalid release campaign snapshots")
+        elif set(self.snapshot_ids) != {DatasetName.MEMLENS, DatasetName.MEMGALLERY}:
             raise ValueError("campaign snapshots must cover both benchmarks")
         if self.phase is CampaignPhase.PAPER and not self.protocol_freeze_hash:
             raise ValueError("paper campaigns require an approved method protocol freeze")
@@ -510,3 +552,14 @@ class Step8BenchmarkConfig(BaseSchema):
     no_reranker_gap_threshold: float = 0.05
     oracle_at_50: OracleAt50Protocol | None = None
     metadata: JsonDict = Field(default_factory=dict)
+
+    @property
+    def release_request(self) -> dict | None:
+        if "release_request" not in self.metadata:
+            return None
+        from pmmc.release_plan import normalize_plan
+
+        request = normalize_plan(self.metadata["release_request"])
+        if request != self.metadata["release_request"]:
+            raise ValueError("release request must be canonical")
+        return request

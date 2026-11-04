@@ -274,6 +274,8 @@ class CampaignWorker:
                         or receipt.source_fingerprint != job.source_fingerprint
                         or receipt.upstream_receipt_hashes != upstream
                         or receipt.schema_revision != STEP8_ALEMBIC_REVISION
+                        or (job.release_stages and hashlib.sha256(json_bytes(receipt.output)).hexdigest()
+                            not in receipt.artifact_hashes)
                     ):
                         raise ValueError("incompatible_component_recovery_receipt")
                     for digest in receipt.artifact_hashes:
@@ -338,6 +340,8 @@ class CampaignWorker:
                         output = {**output, "maintenance_execution": maintenance}
                         output_digest = self.store.put_json(output)
                         hashes = list(dict.fromkeys([*hashes, digest, output_digest]))
+                    if job.release_stages and hashlib.sha256(json_bytes(output)).hexdigest() not in hashes:
+                        raise ValueError("selected_component_output_not_content_addressed")
                     for digest in hashes:
                         self.store.verify(digest)
                     receipt = ComponentReceipt(

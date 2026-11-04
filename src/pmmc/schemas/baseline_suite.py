@@ -23,6 +23,15 @@ from pmmc.schemas.baseline import BaselineMethod
 FOUNDATIONAL_BASELINE_METHODS = tuple(BaselineMethod)
 
 
+def is_release_baseline_suite(methods: Sequence[BaselineMethod], metadata: Mapping[str, object]) -> bool:
+    digest = metadata.get("release_plan_hash")
+    return (len(methods) == 1 and methods[0].value == metadata.get("standalone_method")
+            and metadata.get("partition_role") == "development" and metadata.get("paper_result") is False
+            and metadata.get("answer_contract_version") == "typed-answer-contract-v3"
+            and isinstance(digest, str) and len(digest) == 64
+            and all(char in "0123456789abcdef" for char in digest))
+
+
 def is_step8_caption_fallback_suite(
     methods: Sequence[BaselineMethod], metadata: Mapping[str, object],
 ) -> bool:
@@ -113,6 +122,7 @@ class BaselineSuiteManifest(BaseSchema):
             and not component_mode
             and not internal_fallback_mode
             and not is_step8_caption_fallback_suite(self.methods, self.metadata)
+            and not is_release_baseline_suite(self.methods, self.metadata)
         ):
             raise ValueError(
                 "paper baseline suites require exactly five methods or one isolated component"

@@ -1,6 +1,6 @@
 profile_version: pmmc-runtime-profile-v1
-profile_name: h100-step8-exploration
-hardware_class: nvidia-h100-80gb
+profile_name: single-node-exploration
+hardware_class: nvidia-single-node
 model_lock_path: configs/release/models.lock.json
 weight_safety_factor: 1.1
 gpu_reserve_fraction: 0.1
@@ -62,10 +62,10 @@ services:
     calibration_required: true
     frozen_replica_topology:
       tensor_parallel_size: 1
-      replica_count: 8
+      replica_count: 1
     calibrated_placement_options:
     - tensor_parallel_size: 1
-      replica_count: 8
+      replica_count: 1
 - service_id: qwen35-27b-answer
   role: answer
   backend: vllm_chat
@@ -76,7 +76,7 @@ services:
   max_model_len: 32768
   max_num_seqs: 4
   tensor_parallel_candidates:
-  - 2
+  - 1
   gpu_memory_utilization: 0.9
   startup_timeout_seconds: 1800
   port: 8201
@@ -86,15 +86,13 @@ services:
     resource_class: gpu_27b
     calibration_required: true
     frozen_replica_topology:
-      tensor_parallel_size: 2
-      replica_count: 4
+      tensor_parallel_size: 1
+      replica_count: 1
     requires_capacity_receipt: true
     capacity_receipt_filename: step8-exploration-27b-native-capacity.json
     calibrated_placement_options:
-    - tensor_parallel_size: 2
-      replica_count: 4
     - tensor_parallel_size: 1
-      replica_count: 8
+      replica_count: 1
     capacity_image_workload:
       context_audit_hash: 31c2508a105577df07a0f3a25be10d7461b553f826457fa32fb5973b80e6cd41
       image_height: 4032

@@ -14,6 +14,7 @@ import hashlib
 import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
@@ -25,14 +26,19 @@ from pydantic import Field
 from pmmc.compiler.ids import canonical_content_hash
 from pmmc.experiments.step8_artifacts import CampaignArtifactStore, write_json
 from pmmc.infrastructure.database.step8_models import BenchmarkBudgetApprovalModel
-from pmmc.infrastructure.database.step8_repositories import PostgresBenchmarkRepository
+from pmmc.infrastructure.database.step8_repositories import (
+    PostgresBenchmarkRepository,
+    require_budget_binding,
+)
 from pmmc.infrastructure.settings import Settings
+from pmmc.models.campaign_audit import current_campaign_audit
 from pmmc.models.protocols import GenerationGateway
 from pmmc.models.provider_images import LocalImageDimensions
 from pmmc.models.provider_token_budget import SHARED_CONTEXT_TOKENS, ProviderTokenBudgetCounter
 from pmmc.models.providers import ProviderCallError, provider_output_budget
 from pmmc.models.registry import ModelRegistry, ModelRegistryEntry
 from pmmc.models.step8_rate_limits import ProviderRateAdmission, ProviderRateLimit
+from pmmc.release_plan import plan_from_environment, plan_hash
 from pmmc.schemas import GenerationRequest, GenerationResult, ImageRef
 from pmmc.schemas.base import BaseSchema
 
@@ -60,6 +66,30 @@ class SelectionApproval:
             raise ValueError("selection and frozen rate card require SHA256 identities")
 
 
+_RELEASE_SCOPE: ContextVar[tuple[dict[str, str], frozenset[str]] | None] = ContextVar(
+    "release_budget_worker_scope", default=None)
+
+
+def bind_release_worker(plan: dict, campaign_id: str, selection_hash: str,
+                        scope_hash: str, job_ids: Sequence[str]) -> None:
+    """Install the worker's verified native scope, not an environment-only capability."""
+    _RELEASE_SCOPE.set((dict(plan_hash=plan_hash(plan), campaign_id=campaign_id,
+                             selection_hash=selection_hash, scope_hash=scope_hash),
+                        frozenset(job_ids)))
+
+
+def _worker_binding() -> dict[str, str] | None:
+    plan = plan_from_environment(os.environ)
+    scope = _RELEASE_SCOPE.get()
+    if plan is None and scope is None:
+        return None
+    audit = current_campaign_audit()
+    if (plan is None or scope is None or audit is None or scope[0]["plan_hash"] != plan_hash(plan)
+            or audit.campaign_id != scope[0]["campaign_id"] or audit.job_id not in scope[1]):
+        raise ProviderCallError("ExplicitSelectionApprovalRequired", outcome="failed")
+    return scope[0]
+
+
 async def require_selection_approval(
     repository: PostgresBenchmarkRepository,
     approval: SelectionApproval,
@@ -69,13 +99,23 @@ async def require_selection_approval(
         row = await session.get(BenchmarkBudgetApprovalModel, approval.approval_id)
         if (
             row is None
-            or row.campaign_id != approval.campaign_id
-            or row.selection_hash != approval.selection_hash
             or row.rate_card_hash != approval.rate_card_hash
             or not row.approver_id.strip()
-            or row.limit_usd <= 0
+            or (row.limit_usd is not None and row.limit_usd <= 0)
         ):
             raise ProviderCallError("ExplicitSelectionApprovalRequired", outcome="failed")
+        binding = _worker_binding()
+        try:
+            if binding and (binding["campaign_id"], binding["selection_hash"]) != (
+                approval.campaign_id, approval.selection_hash
+            ):
+                raise ValueError("release_worker_selection_changed")
+            require_budget_binding(row, campaign_id=approval.campaign_id,
+                                   selection_hash=approval.selection_hash,
+                                   plan_hash=binding["plan_hash"] if binding else None,
+                                   scope_hash=binding["scope_hash"] if binding else None)
+        except ValueError as exc:
+            raise ProviderCallError("ExplicitSelectionApprovalRequired", outcome="failed") from exc
 
 
 def _money(value: Decimal) -> Decimal:
@@ -277,6 +317,9 @@ class Step8AccountingGateway:
                 if part.image is not None and not _HASH.fullmatch(part.image.sha256 or ""):
                     raise ValueError("accounted image requests require immutable image SHA256")
         entry = self.registry.get(request.model_alias)
+        plan = plan_from_environment(os.environ)
+        if plan is not None and request.model_alias not in plan["models"]:
+            raise ProviderCallError("ExplicitSelectionApprovalRequired", outcome="failed")
         if entry.provider_config is None:
             raise ValueError("accounting requires a configured Step 8 provider")
         budget = provider_output_budget(
@@ -310,12 +353,14 @@ class Step8AccountingGateway:
         request_hash = canonical_content_hash(identity)
         if recovery_envelope is not None:
             self._check_response_identity(request, request_hash, recovery_envelope)
+        binding = _worker_binding()
         state = await self.repository.reserve(
             self.approval.approval_id,
             request.request_id,
             request_hash,
             entry.provider_config.kind,
             worst_case,
+            **({"binding": binding} if binding else {}),
         )
         if self.provider_control is not None:
             decision = await self.provider_control.reconciliation(request.request_id, request_hash)
@@ -803,8 +848,11 @@ class SettingsAccountingGateway:
                 )
                 if row is None:
                     raise ProviderCallError("ExplicitSelectionApprovalRequired", outcome="failed")
+                binding = _worker_binding()
                 approval = SelectionApproval(
-                    row.campaign_id, row.selection_hash, row.approval_id, self.rate_card.sha256
+                    binding["campaign_id"] if binding else row.campaign_id,
+                    binding["selection_hash"] if binding else row.selection_hash,
+                    row.approval_id, self.rate_card.sha256,
                 )
             # The approval ID is a selection-scoped capability exported by the
             # parent CLI. Explicit request scope, when supplied, must also match.

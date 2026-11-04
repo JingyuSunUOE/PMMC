@@ -4,6 +4,9 @@ protocol_name: step8-exploration
 model_registry: configs/release/models.yaml
 model_lock: configs/release/models.lock.json
 runtime_profile: configs/release/runtime.yaml
+execution_profile: configs/release/execution.yaml
+execution:
+  cpu_workers: 2
 partition_dir: outputs/step8/exploration/not-a-campaign/no-partition
 exposure_manifest: outputs/step8/exploration/not-a-campaign/no-exposure
 regression_manifest: configs/release/no-regression.json

@@ -494,7 +494,9 @@ def verify_partition(partition_dir: Path) -> BenchmarkPartitionManifest:
         roles[(item.dataset, item.conversation_id)].add(item.role)
     if any(len(values) != 1 for values in roles.values()):
         raise ValueError("a conversation crosses development and paper_test")
-    if manifest.spec.protocol_version in SCENARIO_PROTOCOLS:
+    if manifest.spec.protocol_version in SCENARIO_PROTOCOLS and any(
+        item.dataset is DatasetName.MEMGALLERY for item in manifest.datasets
+    ):
         memgallery = [
             item for item in assignments if item.dataset is DatasetName.MEMGALLERY
         ]

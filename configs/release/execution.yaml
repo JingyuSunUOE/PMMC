@@ -1,0 +1,13 @@
+# Portable single-node starting point, overridden only by release resource sizing.
+execution_protocol: pmmc-throughput-v1
+schedule: model-stage-major-v1
+unit_preparation:
+  workers: 2
+  counter_backend: qwen-vl-cached-exact-v1
+replicas:
+  compiler: 1
+  text_embedding: 1
+  contrastive_embedding: 1
+  multimodal_embedding: 1
+  answer: 1
+  judge: 1

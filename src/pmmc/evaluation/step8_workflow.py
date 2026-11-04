@@ -62,7 +62,11 @@ from pmmc.infrastructure.database.evaluation_models import (
     EvaluationRunModel,
     EvaluationRunStateModel,
 )
-from pmmc.infrastructure.database.experiment_models import EvaluationArtifactModel, RunQueryModel
+from pmmc.infrastructure.database.experiment_models import (
+    EvaluationArtifactModel,
+    RunQueryModel,
+    RunStateModel,
+)
 from pmmc.infrastructure.database.experiment_repositories import ExperimentUnitOfWork
 from pmmc.infrastructure.database.query_executor_models import (
     QueryExecutorRunModel,
@@ -96,8 +100,8 @@ from pmmc.schemas.step8 import BASELINE_METHODS, RELEVANCE_THRESHOLDS, OracleAt5
 
 _VERSION = "step8-query-evaluation-v1"
 _CONTRACT = "typed-answer-contract-v3"
-MethodScope = Literal["all", "pmmc", "pmmc_main", "paired_main"]
-_SCOPES = {"all", "pmmc", "pmmc_main", "paired_main"}
+MethodScope = Literal["all", "pmmc", "pmmc_main", "paired_main", "baseline"]
+_SCOPES = {"all", "pmmc", "pmmc_main", "paired_main", "baseline"}
 _VARIANTS = {
     "active": "pmmc",
     "no_fallback": "no_fallback",
@@ -412,17 +416,25 @@ def bind_cell_inputs(
     return tuple(bound)
 
 
-def evaluation_definitions(cells, treatment, method_scope):
+def evaluation_definitions(cells, treatment, method_scope, *, selected=False, standalone_method=None):
     """Validate the frozen assignments before selecting an explicit execution scope."""
     if method_scope not in _SCOPES:
         raise ValueError("step8_evaluation_scope_invalid")
+    if selected and method_scope not in {"pmmc_main", "pmmc", "baseline"}:
+        raise ValueError("step8_selected_campaign_cannot_claim_paired_evaluation")
     definitions = tuple(
         {**row.payload, "cell_id": row.cell_id}
         for row in cells
         if (row.method != "pmmc" and treatment == "main")
         or (row.method == "pmmc" and row.payload["treatment"] == treatment)
     )
-    if not any(d["method"] == "pmmc" for d in definitions) or {
+    if method_scope == "baseline":
+        matches = tuple(d for d in definitions if d["method"] == standalone_method)
+        if (not selected or standalone_method not in BASELINE_METHODS or len(matches) != 1
+                or treatment != "main"):
+            raise ValueError("step8_standalone_assignment_missing_or_ambiguous")
+        return matches
+    if not any(d["method"] == "pmmc" for d in definitions) or not selected and {
         d["method"] for d in definitions if d["method"] != "pmmc"
     } != (set(BASELINE_METHODS) if treatment == "main" else set()):
         raise ValueError("step8_paired_cell_assignments_missing")
@@ -456,8 +468,10 @@ async def _load_inputs(
 ) -> Step8EvaluationInputs:
     async with sessions() as session:
         campaign = await session.get(BenchmarkCampaignModel, campaign_id)
-        run = await session.get(QueryExecutorRunModel, run_id)
         suite = await session.get(BaselineSuiteModel, suite_id)
+        if method_scope == "baseline":
+            return await _load_standalone_inputs(sessions, session, campaign, suite, run_id, query_id)
+        run = await session.get(QueryExecutorRunModel, run_id)
         if campaign is None or run is None or suite is None:
             raise ValueError("step8_evaluation_parent_missing")
         primary = method_scope == "pmmc_main"
@@ -506,6 +520,13 @@ async def _load_inputs(
         baseline_runs = {row.method: row.run_id for row in links}
         treatment = run.metadata_json.get("treatment")
         validate_baseline_links(baseline_runs, treatment, method_scope)
+        if campaign.payload.get("release_plan_hash") and (
+            suite.metadata_json.get("release_plan_hash") != campaign.payload["release_plan_hash"]
+            or suite.metadata_json.get("release_campaign_id") != campaign_id
+            or suite.metadata_json.get("internal_pmmc_fallback") is not True
+            or set(baseline_runs) != {"native_multimodal_rag"}
+        ):
+            raise ValueError("step8_selected_pmmc_fallback_suite_mismatch")
         if treatment == "no_raw_image" and (
             suite.metadata_json.get("allow_memory_raw_images") is not False
             or not suite.metadata_json.get("internal_pmmc_fallback")
@@ -528,7 +549,8 @@ async def _load_inputs(
                 )
             )
         ).all()
-        definitions = evaluation_definitions(cells, treatment, method_scope)
+        definitions = evaluation_definitions(cells, treatment, method_scope,
+                                             selected=bool(campaign.payload.get("release_plan_hash")))
         if any(row.protocol_hash != campaign.protocol_hash for row in cells):
             raise ValueError("step8_cell_protocol_mismatch")
         result_query = select(QueryExperimentCellResultModel).where(
@@ -598,6 +620,53 @@ async def _load_inputs(
             (campaign.payload["protocol"]["text_relevance_threshold"],
              campaign.payload["protocol"]["multimodal_relevance_threshold"]) if primary else None,
         )
+
+
+async def _load_standalone_inputs(sessions, session, campaign, suite, run_id, query_id):
+    """Bind the actual completed suite child without manufacturing a PMMC run."""
+    from pmmc.schemas.baseline import BaselineMethod
+    from pmmc.schemas.baseline_suite import is_release_baseline_suite
+
+    if (campaign is None or suite is None or campaign.phase != "exploration"
+            or not is_release_baseline_suite([BaselineMethod(m) for m in suite.methods], suite.metadata_json)
+            or suite.metadata_json["release_plan_hash"] != campaign.payload.get("release_plan_hash")
+            or suite.metadata_json.get("release_campaign_id") != campaign.campaign_id
+            or suite.metadata_json.get("method_protocol_hash") != campaign.protocol_hash
+            or campaign.payload["snapshot_ids"].get(suite.dataset) != suite.snapshot_id):
+        raise ValueError("step8_standalone_suite_contract_mismatch")
+    method, = suite.methods
+    link = await session.scalar(select(BaselineSuiteRunModel).where(
+        BaselineSuiteRunModel.suite_id == suite.suite_id, BaselineSuiteRunModel.method == method))
+    state = await session.get(RunStateModel, run_id)
+    if link is None or link.run_id != run_id or state is None or state.status != "completed":
+        raise ValueError("step8_standalone_child_incomplete")
+    suite_queries = set((await session.scalars(select(BaselineSuiteQueryModel.query_id).where(
+        BaselineSuiteQueryModel.suite_id == suite.suite_id))).all())
+    child_queries = set((await session.scalars(select(RunQueryModel.query_id).where(
+        RunQueryModel.run_id == run_id))).all())
+    if suite_queries != {query_id} or child_queries != suite_queries:
+        raise ValueError("step8_standalone_query_denominator_mismatch")
+    cells = (await session.scalars(select(ExperimentCellModel).join(
+        BenchmarkCellAssignmentModel, BenchmarkCellAssignmentModel.cell_id == ExperimentCellModel.cell_id
+    ).where(BenchmarkCellAssignmentModel.campaign_id == campaign.campaign_id,
+            BenchmarkCellAssignmentModel.query_id == query_id,
+            ExperimentCellModel.protocol_hash == campaign.protocol_hash,
+            ExperimentCellModel.dataset == suite.dataset,
+            ExperimentCellModel.answer_model == suite.answer_model_alias,
+            ExperimentCellModel.method == method))).all()
+    definitions = evaluation_definitions(cells, "main", "baseline", selected=True, standalone_method=method)
+    rows = (await session.scalars(select(QueryRuntimeTypedAnswerModel).where(
+        QueryRuntimeTypedAnswerModel.query_executor_run_id == run_id,
+        QueryRuntimeTypedAnswerModel.query_id == query_id))).all()
+    answers = {row.typed_answer_id: _decode_answer(row) for row in rows}
+    if any(a.snapshot_id != suite.snapshot_id or a.method != method for a in answers.values()):
+        raise ValueError("step8_standalone_answer_mismatch")
+    query = await PostgresRuntimeQueryRepository(sessions).get(suite.snapshot_id, query_id)
+    return Step8EvaluationInputs(query, suite.snapshot_id, campaign.protocol_hash,
+        campaign.payload["protocol"]["judge_alias"], bind_cell_inputs(
+            definitions=definitions, result_rows=(), answers=answers,
+            answer_hashes={r.typed_answer_id: r.content_hash for r in rows},
+            query_run_id=run_id, baseline_runs={method: run_id}, query_id=query_id))
 
 
 class _ModelCallWriter:
@@ -682,8 +751,8 @@ async def _register(
             insert(EvaluationRunModel)
             .values(
                 evaluation_run_id=evaluation_run_id,
-                source_kind="pmmc_query_run",
-                suite_id=None,
+                source_kind="baseline_suite" if metadata["method_scope"] == "baseline" else "pmmc_query_run",
+                suite_id=metadata["suite_id"] if metadata["method_scope"] == "baseline" else None,
                 legacy_source_run_id=run_id,
                 protocol_version=_VERSION,
                 normalizer_version="typed-exact-preserve-scalars-v1",
@@ -740,7 +809,7 @@ async def evaluate_step8_query(
     if method_scope not in _SCOPES:
         raise ValueError("step8_evaluation_scope_invalid")
     primary = method_scope == "pmmc_main"
-    auxiliary = method_scope not in {"pmmc_main", "paired_main"}
+    auxiliary = method_scope not in {"pmmc_main", "paired_main", "baseline"}
     if not auxiliary and oracle_hook is not None:
         raise ValueError("main and paired readouts cannot dispatch an oracle")
     engine, sessions = create_session_factory(settings, DatabaseRole.EVALUATOR)
@@ -865,6 +934,7 @@ async def evaluate_step8_query(
         config_identity = {
             "adapter": _VERSION,
             "method_scope": method_scope,
+            **({"standalone_method": inputs.cells[0].method} if method_scope == "baseline" else {}),
             "oracle_identity": (
                 {
                     **oracle_hook.identity,
@@ -1243,7 +1313,8 @@ async def evaluate_step8_query(
             "evaluation_run_id": evaluation_run_id,
             "campaign_id": campaign_id,
             "suite_id": suite_id,
-            "query_executor_run_id": query_executor_run_id,
+            "query_executor_run_id": None if method_scope == "baseline" else query_executor_run_id,
+            **({"baseline_run_id": query_executor_run_id} if method_scope == "baseline" else {}),
             "query_id": query_id,
             "status": "incomplete" if incomplete else "complete",
             "method_scope": method_scope,
@@ -1301,6 +1372,41 @@ async def evaluate_step8_query(
             raise Step8EvaluationIncomplete(result)
         await _finish(sessions, evaluation_run_id, len(rows), report, result["artifact"])
         return result
+    finally:
+        await engine.dispose()
+
+
+async def verify_selected_score_recovery(
+    settings: Settings, output: dict, *, campaign_id: str, suite_id: str,
+    source_run_id: str, query_id: str, snapshot_id: str, method_scope: MethodScope,
+) -> None:
+    """A saved worker receipt cannot replace the SQL-triggered completion attestation."""
+    report = {k: v for k, v in output.items() if k != "artifact"}
+    artifact = output.get("artifact") or {}
+    digest = hashlib.sha256((json.dumps(report, sort_keys=True, separators=(",", ":"),
+                                       allow_nan=False) + "\n").encode()).hexdigest()
+    expected = {"campaign_id": campaign_id, "suite_id": suite_id, "query_id": query_id,
+                "method_scope": method_scope, "status": "complete", "schema_version": _VERSION,
+                "scientific_approval": False,
+                "query_executor_run_id": None if method_scope == "baseline" else source_run_id}
+    if method_scope == "baseline":
+        expected["baseline_run_id"] = source_run_id
+    if any(report.get(k) != v for k, v in expected.items()) or digest != artifact.get("sha256"):
+        raise ValueError("release_score_recovery_identity_changed")
+    engine, sessions = create_session_factory(settings, DatabaseRole.EVALUATOR)
+    try:
+        async with sessions() as session:
+            run = report["evaluation_run_id"]
+            state = await session.get(EvaluationRunStateModel, run)
+            row = await session.get(EvaluationArtifactModel, artifact["artifact_id"])
+            if (state is None or state.status != "completed"
+                    or state.metadata_json.get("completion_report") != report
+                    or state.metadata_json.get("completion_artifact") != {
+                        "artifact_id": artifact["artifact_id"], "sha256": digest}
+                    or row is None or row.state != "ready" or row.evaluation_run_id != run
+                    or row.run_id != source_run_id or row.query_id != query_id or row.snapshot_id != snapshot_id
+                    or any(getattr(row, k) != artifact.get(k) for k in ("sha256", "object_key", "storage_uri"))):
+                raise ValueError("release_score_recovery_requires_committed_evaluation")
     finally:
         await engine.dispose()
 

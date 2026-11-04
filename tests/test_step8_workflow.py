@@ -419,7 +419,8 @@ def source_memory():
     )
 
 
-def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories=()):
+def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories=(),
+                   query=None, snapshot_id="snapshot", protocol_hash="protocol"):
     from pmmc.schemas.step8_process import (
         PROCESS_METRIC_NAMES,
         ProcessCellMetrics,
@@ -427,7 +428,7 @@ def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories
         ProcessMetricsReport,
     )
 
-    query = QueryInput(
+    query = query or QueryInput(
         query_id="query",
         dataset="memgallery",
         conversation_id="conversation",
@@ -437,7 +438,7 @@ def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories
     )
     config = BaselineEvaluationConfig()
     inputs = workflow.Step8EvaluationInputs(
-        query, "snapshot", "protocol", config.judge_model_alias, tuple(cells)
+        query, snapshot_id, protocol_hash, config.judge_model_alias, tuple(cells)
     )
     # This facade fixture isolates answer evaluation; the process reader/scorer has
     # its own authoritative-fact tests. Do not teach production code about mocks.
@@ -563,9 +564,9 @@ def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories
     )
     settings.model_copy = lambda **kwargs: settings
 
-    def run(**kwargs):
+    def run(*, campaign_id="campaign", source_run_id="run", suite_id="suite", **kwargs):
         return asyncio.run(
-            workflow.evaluate_step8_query(settings, "campaign", "run", "suite", "query", **kwargs)
+            workflow.evaluate_step8_query(settings, campaign_id, source_run_id, suite_id, query.query_id, **kwargs)
         )
 
     return SimpleNamespace(

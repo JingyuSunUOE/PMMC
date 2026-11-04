@@ -7,7 +7,7 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
@@ -254,11 +254,14 @@ def run_exploration_command(
     settings = get_settings()
     directory = exploration_campaign_directory(settings, run_id, variant=variant)
     with campaign_failure_boundary(directory, stage="exploration-" + stage):
-        require_comparison_order(settings, run_id, variant, stage)
-        if stage == "baselines":
+        _, config = _load(directory)
+        declared = config.metadata.get("release_request") is not None
+        if not declared:
+            require_comparison_order(settings, run_id, variant, stage)
+        if not declared and stage == "baselines":
             record_comparison(settings, run_id, require=True)
         result = execute_stage(settings, directory, stage, worker_pool)
-        if worker_pool != "gpu" and result["state"] == "stage_complete" and stage != "baselines":
+        if not declared and worker_pool != "gpu" and result["state"] == "stage_complete" and stage != "baselines":
             record_comparison(settings, run_id)
     typer.echo(json.dumps(result, sort_keys=True))
 
@@ -271,16 +274,12 @@ def quote_exploration_command(
 ) -> None:
     """Estimate remaining API work; this command cannot approve spending."""
     from pmmc.experiments.release_inputs import exploration_campaign_directory
-    from pmmc.experiments.release_reporting import estimate_release_budget
-    from pmmc.experiments.step8_supervisor import _snapshot
+    from pmmc.experiments.release_reporting import quote_release_plan
 
     settings = get_settings()
     directory = exploration_campaign_directory(settings, run_id, variant=variant)
-    manifest, _ = _load(directory)
-    asyncio.run(_register(directory, budget=None, rate_card=None, approver=None, retry=False))
-    quote = estimate_release_budget(directory, jobs=asyncio.run(
-        _snapshot(settings, manifest.campaign_id)), scope=stage, rate_card=rate_card,
-        project_root=settings.project_root)
+    quote = asyncio.run(quote_release_plan(settings, directory, scope=stage, rate_card=rate_card,
+                                         prepare_missing=True))
     write_json(directory / "reports" / f"budget-quote-{stage}.json", quote)
     typer.echo(json.dumps(quote, sort_keys=True))
 
@@ -289,23 +288,83 @@ def quote_exploration_command(
 def approve_exploration_command(
     run_id: str = typer.Option(...), rate_card: Path = typer.Option(..., exists=True),
     selection_hash: str = typer.Option(...), approver_id: str = typer.Option(...),
-    limit_usd: str = typer.Option(...),
+    limit_usd: str | None = typer.Option(None),
+    uncapped: bool = typer.Option(False, "--uncapped"),
+    plan_hash: str | None = typer.Option(None),
     variant: Literal["wr", "w", "r", "legacy"] = typer.Option("wr"),
     stage: Literal["main", "analysis", "baselines"] = typer.Option("main"),
 ) -> None:
     """Authorize a new selection only after its quote, never from an older ledger."""
     from pmmc.experiments.release_inputs import exploration_campaign_directory
     from pmmc.experiments.release_reporting import approve_release_budget
+    from pmmc.infrastructure.database.step8_repositories import validate_budget_policy
 
+    try:
+        amount = Decimal(limit_usd) if limit_usd is not None else None
+        validate_budget_policy(amount, uncapped)
+    except InvalidOperation as exc:
+        raise typer.BadParameter("--limit-usd must be a decimal USD amount") from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     settings = get_settings()
     directory = exploration_campaign_directory(settings, run_id, variant=variant)
     quote = json.loads((directory / "reports" / f"budget-quote-{stage}.json").read_bytes())
     if (quote["selection_hash"] != selection_hash
+            or (plan_hash is not None and quote.get("plan_hash") != plan_hash)
             or quote["rate_card_sha256"] != sha256_file(rate_card)):
         raise ValueError("budget_quote_does_not_match_selection_and_rates")
     result = asyncio.run(approve_release_budget(directory, selection_hash=selection_hash,
         rate_card=rate_card, project_root=settings.project_root, approver_id=approver_id,
-        limit_usd=Decimal(limit_usd)))
+        limit_usd=amount, uncapped=uncapped,
+        scope=stage))
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
+@app.command("spend-exploration")
+def spend_exploration_command(
+    run_id: str = typer.Option(...),
+    variant: Literal["wr", "w", "r", "legacy"] = typer.Option("wr"),
+) -> None:
+    """Read cumulative settled and held spend, including during a stopped or unfinished stage."""
+    from pmmc.experiments.release_execution import selection_spend
+    from pmmc.experiments.release_inputs import exploration_campaign_directory
+    from pmmc.experiments.release_reporting import _campaign_plan, _read
+    from pmmc.release_plan import plan_hash
+
+    settings = get_settings()
+    directory = exploration_campaign_directory(settings, run_id, variant=variant)
+    manifest, _ = _load(directory)
+    selection = _latest_selection(directory).content_hash
+    plan = _campaign_plan(directory)
+    digest = plan_hash(plan) if plan else None
+    path = Path("manifests") / f"budget-{selection}.json"
+    ledger = None
+    if (directory / path).exists():
+        local = json.loads(_read(directory, path))
+        if local["selection_hash"] != selection or local.get("plan_hash") != digest:
+            raise ValueError("release_budget_plan_selection_mismatch")
+        ledger = asyncio.run(selection_spend(settings, local["approval_id"], manifest.campaign_id,
+                                             selection, plan_hash=digest))
+    typer.echo(json.dumps(dict(campaign_id=manifest.campaign_id, selection_hash=selection,
+                               plan_hash=digest, ledger=ledger), sort_keys=True))
+
+
+@app.command("stop-exploration-budget")
+def stop_exploration_budget_command(
+    run_id: str = typer.Option(...), approval_id: str = typer.Option(...),
+    plan_hash: str = typer.Option(...), selection_hash: str = typer.Option(...),
+    operator_id: str = typer.Option(...), reason_code: str = typer.Option(...),
+    variant: Literal["wr", "w", "r", "legacy"] = typer.Option("wr"),
+) -> None:
+    """Permanently fence new reservations on one approved plan; never erase an existing hold."""
+    from pmmc.experiments.release_inputs import exploration_campaign_directory
+    from pmmc.experiments.release_reporting import stop_release_budget
+
+    settings = get_settings()
+    directory = exploration_campaign_directory(settings, run_id, variant=variant)
+    result = asyncio.run(stop_release_budget(settings, directory, approval_id=approval_id,
+                         expected_plan_hash=plan_hash, selection_hash=selection_hash,
+                         operator_id=operator_id, reason_code=reason_code))
     typer.echo(json.dumps(result, sort_keys=True))
 
 
@@ -477,6 +536,8 @@ def plan(
         selection=selected,
         conversations=conversations,
         project_root=settings.project_root,
+        request=resolved.release_request,
+        variant=str(resolved.metadata.get("exploration_variant", "wr")),
     )
     try:
         inventory = persist_campaign_job_plan(directory=directory, selection=selected, jobs=jobs)
@@ -516,6 +577,79 @@ def _validate_development_budget(
         raise ValueError("development API budget exceeds configured total limit")
 
 
+async def _publish_plan_budget(
+    settings, quote: dict, rate_card: Path, approver_id: str, limit: Decimal | None
+) -> dict:
+    import hashlib
+
+    from pmmc.experiments.release_inputs import exploration_campaign_directory
+
+    bindings = quote["plan_bindings"]
+    anchor = bindings[quote["plan"]["variants"][0]]
+    amount = format(limit.normalize(), "f") if limit is not None else None
+    card = rate_card.read_bytes()
+    if hashlib.sha256(card).hexdigest() != quote["rate_card_sha256"]:
+        raise ValueError("release_budget_rate_card_changed")
+    common = dict(
+        plan_hash=quote["plan_hash"],
+        budget_mode="finite" if limit is not None else "uncapped",
+        limit_usd=amount,
+        rate_card_hash=quote["rate_card_sha256"],
+        review_sha256=quote["review_sha256"],
+        approver_id=approver_id,
+    )
+    files = []
+    for variant, member in bindings.items():
+        directory = exploration_campaign_directory(
+            settings, quote["plan"]["run_id"], variant=variant
+        )
+        manifest, _ = _load(directory)
+        selection = _latest_selection(directory).content_hash
+        if (manifest.campaign_id, selection) != (member["campaign_id"], member["selection_hash"]):
+            raise ValueError("release_budget_child_binding_changed")
+        payload = dict(
+            **common,
+            campaign_id=manifest.campaign_id,
+            selection_hash=selection,
+            scope_hashes=member["scopes"],
+        )
+        path = directory / "manifests" / f"budget-{selection}.json"
+        card_path = directory / "manifests" / f"rate-card-{selection}.json"
+        if path.exists():
+            existing = json.loads(path.read_bytes())
+            if any(existing.get(k) != v for k, v in payload.items()):
+                raise ValueError("conflicting immutable release plan approval")
+        if card_path.exists() and card_path.read_bytes() != card:
+            raise ValueError("conflicting immutable release plan rate card")
+        files.append((path, card_path, payload))
+    engine, sessions = create_session_factory(settings, DatabaseRole.RUNTIME)
+    try:
+        approval_id = await PostgresBenchmarkRepository(sessions).approve_budget(
+            campaign_id=anchor["campaign_id"],
+            selection_hash=anchor["selection_hash"],
+            approver_id=approver_id,
+            rate_card_hash=quote["rate_card_sha256"],
+            limit_usd=limit,
+            uncapped=limit is None,
+            plan_hash=quote["plan_hash"],
+            plan_bindings=bindings,
+        )
+    finally:
+        await engine.dispose()
+    # Idempotent after a crash: the unique plan row and immutable artifacts must agree.
+    for path, card_path, payload in files:
+        durable_write(card_path, card, immutable=True)
+        write_json(path, {**payload, "approval_id": approval_id}, immutable=True)
+    return {
+        **common,
+        "approval_id": approval_id,
+        "campaign_id": quote["campaign_id"],
+        "selection_hash": quote["selection_hash"],
+        "plan_bindings": bindings,
+        "rate_card_sha256": quote["rate_card_sha256"],
+    }
+
+
 async def _register(
     directory: Path,
     *,
@@ -526,6 +660,8 @@ async def _register(
 ) -> tuple[str | None, dict[str, int]]:
     manifest, config = _load(directory)
     if budget is not None:
+        if config.release_request is not None:
+            raise ValueError("use quote/approve-exploration for an immutable release plan")
         if rate_card is None or approver is None:
             raise ValueError("API budget requires --rate-card and --approver-id")
         _preflight_rate_card(rate_card, manifest, config)
@@ -534,7 +670,19 @@ async def _register(
     saved_budget_path = directory / "manifests" / f"budget-{selection.content_hash}.json"
     if saved_budget_path.is_file():
         saved_budget = json.loads(saved_budget_path.read_text())
-        _validate_development_budget(manifest, config, Decimal(saved_budget["limit_usd"]))
+        if config.release_request is None:
+            if saved_budget.get("plan_hash") is not None or saved_budget["limit_usd"] is None:
+                raise ValueError("release_budget_plan_selection_mismatch")
+            _validate_development_budget(manifest, config, Decimal(saved_budget["limit_usd"]))
+        else:
+            from pmmc.release_plan import plan_hash
+
+            expected = plan_hash(config.release_request)
+            if (saved_budget.get("plan_hash") != expected or manifest.release_plan_hash != expected
+                    or selection.release_plan_hash != expected
+                    or saved_budget.get("campaign_id") != manifest.campaign_id
+                    or saved_budget.get("selection_hash") != selection.content_hash):
+                raise ValueError("release_budget_plan_selection_mismatch")
     freeze_file = directory / "manifests/method-freeze.json"
     freeze = (
         MethodProtocolFreeze.model_validate_json(freeze_file.read_text())
@@ -550,12 +698,25 @@ async def _register(
         )
         for identity in job_ids
     ]
+    cells = build_experiment_matrix(manifest.protocol, config.release_request,
+                                    variant=str(config.metadata.get("exploration_variant", "wr")))
+    if manifest.release_plan_hash is not None or config.release_request is not None:
+        from pmmc.compiler.ids import canonical_content_hash
+        from pmmc.release_plan import plan_hash
+
+        if (config.release_request is None or manifest.release_plan_hash != plan_hash(config.release_request)
+                or selection.release_plan_hash != manifest.release_plan_hash
+                or selection.campaign_id != manifest.campaign_id or not cells
+                or manifest.matrix_hash != canonical_content_hash([c.model_dump(mode="json") for c in cells])
+                or set(selection.query_ids) != set(config.release_request["benchmarks"])
+                or set(manifest.snapshot_ids) != set(selection.query_ids)
+                or [j.job_id for j in jobs] != job_ids
+                or not all(j.release_stages and j.campaign_id == manifest.campaign_id for j in jobs)):
+            raise ValueError("release_registration_identity_mismatch")
     engine, sessions = create_session_factory(get_settings(), DatabaseRole.RUNTIME)
     try:
         repository = PostgresBenchmarkRepository(sessions)
-        await repository.register(
-            manifest, selection, build_experiment_matrix(manifest.protocol), freeze
-        )
+        await repository.register(manifest, selection, cells, freeze)
         await repository.add_jobs(jobs)
         approval_id = None
         if budget is not None:
@@ -603,7 +764,7 @@ def _preflight_rate_card(path, manifest, config) -> None:
     report = preflight_provider_rate_card(
         path,
         load_model_registry(settings.resolve_path(config.model_registry)),
-        manifest.protocol.answer_backbones,
+        config.release_request["models"] if config.release_request else manifest.protocol.answer_backbones,
     )
     typer.echo(json.dumps({"event": "STEP8_RATE_CARD_PREFLIGHT", **report}, sort_keys=True))
 
@@ -668,6 +829,23 @@ def _run_campaign(
         if approval and (not budget_path.exists()
                          or json.loads(budget_path.read_bytes())["approval_id"] != approval):
             raise ValueError("explicit_approval_does_not_match_exploration_selection")
+        if config.release_request is not None:
+            from pmmc.release_plan import plan_hash
+
+            request = config.release_request
+            expected = plan_hash(request)
+            # The launcher environment transports intent to preparation, not
+            # authority to a worker. Export only the checked immutable recipe.
+            os.environ["PMMC_RELEASE_REQUEST"] = json.dumps(request)
+            if approval:
+                local = json.loads(budget_path.read_bytes())
+                if (local.get("plan_hash") != expected or local.get("campaign_id") != manifest.campaign_id
+                        or local.get("selection_hash") != selection_hash
+                        or exploration_scope not in local.get("scope_hashes", {}).values()):
+                    raise ValueError("explicit_approval_does_not_match_release_plan_scope")
+                from pmmc.models.step8_accounting import bind_release_worker
+
+                bind_release_worker(request, manifest.campaign_id, selection_hash, exploration_scope, job_ids)
         registered_counts = {}
     else:
         approval, registered_counts = asyncio.run(

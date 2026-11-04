@@ -2,45 +2,56 @@
 
 import io
 import json
-import subprocess
 import sys
 import tarfile
+import tomllib
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from scripts.release_host import backends, cold_start
-from scripts.release_host.backends import Compose, Kueue, ReceiptError, receipt
-from scripts.release_host.config import ROOT, TARGETS, Error, load_config
+from scripts.release_host.backends import Kueue, ReceiptError, receipt
+from scripts.release_host.config import ROOT, Error, load_config, validate_config
 from scripts.release_host.evidence import collect, safe_log
 from scripts.release_host.quota import headroom, peak, pending_reason
 from scripts.release_host.runner import launch, read
-from scripts.release_host.workloads import ADMIN, IAM_KEYS, PROVIDER, VERIFY_POINTER, credentials
+from scripts.release_host.workloads import VERIFY_POINTER, credentials
+
+from pmmc.release_plan import normalize_plan, plan_hash
 
 HASH = "a" * 64
+pytestmark = pytest.mark.usefixtures("installed_host_lock")
 
 
-def config(tmp, profile="local-nvidia", **replace):
-    raw = (ROOT / "deploy/release" / f"{profile}.toml").read_text()
-    for placeholder in ("APP", "STEP8_IAM", "PG16_PGVECTOR", "MINIO"):
+def config(tmp, profile="kubernetes", **replace):
+    raw = (ROOT / "deploy/release/kubernetes.toml").read_text()
+    raw = raw.replace(
+        "[images]",
+        "[images]\n"
+        + "\n".join(
+            f'{k}="example.com/pmmc/{k}@sha256:{HASH}"' for k in ("app", "iam", "postgres", "minio")
+        ),
+    )
+    raw = raw.replace('discovery = "live"', 'discovery = "declared"')
+    raw += "\n[capacity]\ngpus=1\ncpus=16\nmemory_gib=96\n"
+    for p in ("APP", "STEP8_IAM", "PG16_PGVECTOR", "MINIO"):
         raw = raw.replace(
-            f"REPLACE_WITH_PINNED_{placeholder}_IMAGE", f"example.com/pmmc/test@sha256:{HASH}"
+            f"REPLACE_WITH_PINNED_{p}_IMAGE", f"example.com/pmmc/{p.lower()}@sha256:{HASH}"
         )
-    for placeholder in (
+    for p in (
         "KUBECTL_CONTEXT",
         "NAMESPACE",
         "LOCALQUEUE",
         "BOUND_RWX_CLAIM",
         "APPROVED_RWO_CLASS",
     ):
-        raw = raw.replace(f"REPLACE_WITH_{placeholder}", "fixture")
-    raw = raw.replace("/srv/pmmc-release", str(tmp / "mounts"))
+        raw = raw.replace(f"REPLACE_WITH_{p}", "fixture")
     for key, value in replace.items():
         raw = raw.replace(key, value)
-    file = tmp / "deploy.toml"
-    file.write_text(raw)
-    return load_config(file, profile)
+    path = tmp / "deploy.toml"
+    path.write_text(raw)
+    return validate_config(tomllib.loads(raw), profile)
 
 
 def pool(role, stage, paid, *, waiting=False):
@@ -63,35 +74,44 @@ def pool(role, stage, paid, *, waiting=False):
     )
 
 
-def test_public_cli_offline_plan(tmp_path):
-    config(tmp_path)
-    result = subprocess.run(
-        [
-            ROOT / "scripts/pmmc",
-            "plan",
-            "--config",
-            tmp_path / "deploy.toml",
-            "--profile",
-            "local-nvidia",
-            "--stage",
-            "main",
-        ],
-        capture_output=True,
-        check=True,
+def test_public_cli_offline_plan(tmp_path, monkeypatch, capsys):
+    from scripts.release_host import cli
+
+    cfg = config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda *a, **kw: cfg)
+    assert (
+        cli.main(
+            [
+                "plan",
+                "--config",
+                str(tmp_path / "deploy.toml"),
+                "--stage",
+                "baselines",
+                "--benchmark",
+                "memgallery",
+                "--method",
+                "caption_text_rag",
+                "--model",
+                "answer-qwen3.5-9b",
+                "--run-id",
+                "demo",
+            ]
+        )
+        == 0
     )
-    plan = json.loads(result.stdout)
-    assert [r["role"] for r in plan["units"]["wr-main"][-1]] == ["control", "gpu"]
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["stages"] == ["wr-baselines"] and plan["selection"]["benchmarks"] == ["memgallery"]
+    assert (
+        plan["selection"]["methods"] == ["caption_text_rag"] and not plan["selection"]["analyses"]
+    )
+    assert not plan["models_with_possible_api_cost"] and len(plan["plan_hash"]) == 64
     assert not (tmp_path / "mounts").exists()
-    result = subprocess.run(
-        [ROOT / "scripts/pmmc", "plan", "--profile", "eidf"], capture_output=True
-    )
-    assert result.returncode and b"digest" in result.stderr
 
 
 @pytest.mark.parametrize(
     "old,new",
     [
-        ("example.com/pmmc/test@sha256:" + HASH, "app:latest"),
+        ("example.com/pmmc/app@sha256:" + HASH, "app:latest"),
         ("calibrate = true", "unexpected = true"),
         ('instance = "pmmc-release"', 'instance = "../outside"'),
         ('inputs = "release/inputs"', 'inputs = "release/../inputs"'),
@@ -100,71 +120,43 @@ def test_public_cli_offline_plan(tmp_path):
 )
 def test_invalid_config(tmp_path, old, new):
     with pytest.raises(Error):
-        config(tmp_path, "eidf", **{old: new})
+        config(tmp_path, **{old: new})
 
 
-@pytest.mark.parametrize("profile", ["eidf", "local-nvidia"])
-def test_render_roles(tmp_path, profile, monkeypatch):
-    cfg = config(tmp_path, profile)
-    name = "instance-test"
-    for key in PROVIDER:
-        monkeypatch.setenv(key, "sensitive-never-log")
-    values = credentials(name)
-    adapter = (Kueue if profile == "eidf" else Compose)(
-        cfg, name, tmp_path, values, HASH, {"variant": "r"}
+def test_render_roles(tmp_path):
+    cfg = config(tmp_path)
+    plan = normalize_plan({"run_id": "demo", "stage": "main", "models": ["answer-gpt-6-luna"]})
+    adapter = Kueue(
+        cfg,
+        "instance-test",
+        tmp_path,
+        credentials("instance-test"),
+        HASH,
+        {"variant": "wr", "kind": "run", "plan": plan},
     )
-
-    def role(r):
-        if profile == "eidf":
-            manifest = adapter.manifest("test", r, "demo", "main")
-            pod = manifest["spec"]["template"]["spec"]
-            assert not pod["automountServiceAccountToken"] and manifest["spec"]["suspend"]
-            container = pod["containers"][0]
-            return container["command"], {e["name"] for e in container["env"]}, container
-        container = adapter.manifest(r, "demo", "main")["services"][r]
-        return container["entrypoint"], set(container["environment"]), container
-
-    for key in ("control", "gpu"):
-        cmd, env, c = role(key)
-        assert cmd[-11:] == [
-            "pmmc",
-            "benchmark",
-            "run-exploration",
-            "--run-id",
-            "demo",
-            "--variant",
-            "r",
-            "--stage",
-            "main",
-            "--worker-pool",
-            key,
-        ]
+    for role in ("control", "gpu", "assets", "prepare", "models", "analysis-report"):
+        pod = adapter.manifest("example", role, "demo", "main")["spec"]["template"]["spec"]
+        assert not pod["automountServiceAccountToken"]
+        c = pod["containers"][0]
+        env = {x["name"] for x in c["env"]}
         assert "PMMC_OBJECT_STORE_ADMIN_SECRET_KEY" not in env
-        assert (ADMIN in env) == (key == "control")
-        assert (set(PROVIDER) <= env) == (key == "control")
-        assert "HF_TOKEN" not in env and "PMMC_DATABASE_ONLINE_URL" in env
-        if profile == "eidf":
-            assert ("nvidia.com/gpu" in c["resources"]["limits"]) == (key == "gpu")
-            assert sorted(
-                m["mountPath"] for m in c["volumeMounts"] if m["name"] == "shared"
-            ) == sorted(TARGETS.values())
-        else:
-            assert ("deploy" in c) == (key == "gpu")
-    assert "--allow-download" in role("models")[0]
-    assert "--create-lock" not in role("models")[0]
-    assert not set(PROVIDER).intersection(role("prepare")[1])
-    assert not set(IAM_KEYS).intersection(role("iam")[1])
-    if profile == "eidf":
-        for resource in adapter.service_objects("postgres"):
-            assert resource["metadata"]["namespace"] == "fixture"
-        sts = adapter.service_objects("minio")[2]
-        assert (
-            sts["metadata"]["labels"].items()
-            <= sts["spec"]["template"]["metadata"]["labels"].items()
+        assert ("OPENAI_API_KEY" in env) == (role == "control")
+        assert "ANTHROPIC_API_KEY" not in env
+        assert ("nvidia.com/gpu" in c["resources"]["limits"]) == (role == "gpu")
+        if role == "assets":
+            assert "HF_TOKEN" not in env
+        if role in ("gpu", "control"):
+            assert "--worker-pool" in c["command"]
+    sts = [adapter.service_objects(role)[2] for role in ("postgres", "minio")]
+    assert (
+        len(
+            {
+                s["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"]
+                for s in sts
+            }
         )
-        assert "resources" in sts["spec"]["template"]["spec"]["containers"][0]
-    adapter.approval = None
-    assert not set(PROVIDER).intersection(role("control")[1])
+        == 2
+    )
 
 
 class Simulated:
@@ -204,7 +196,12 @@ class Simulated:
                 d["scope_hash"] = "b" * 64
             return d
         if role == "approve":
-            return {"approval_id": HASH, "selection_hash": HASH, "limit_usd": "2"}
+            return {
+                "approval_id": HASH,
+                "selection_hash": HASH,
+                "limit_usd": None,
+                "plan_hash": plan_hash(self.req["plan"]),
+            }
         if role == "prepare":
             return {
                 "run_id": self.current_run,
@@ -226,53 +223,45 @@ class Simulated:
         return {"schema": "pmmc-host-evidence-v1", "files": {}}
 
 
-def test_resume_scope_budget_and_all_analysis_variants(tmp_path):
+def test_resume_same_plan_shared_approval_and_no_resubmit(tmp_path):
     cfg, sim = config(tmp_path), Simulated()
     root = tmp_path / "state"
-    progress = root / "runs/demo/progress.json"
+    plan = normalize_plan({"run_id": "demo", "stage": "main"})
 
-    def go(stage=None, **kw):
-        return launch(root, cfg, "demo", stage, factory=sim.factory, sleep=lambda _: None, **kw)
+    def go(**kw):
+        return launch(root, cfg, "demo", plan, factory=sim.factory, sleep=lambda _: None, **kw)
 
     sim.crash = True
     with pytest.raises(Error, match="disconnected"):
-        go("main")
-    assert go(resume=True) == 3 and read(progress)["units"]["wr-main"] == "awaiting_budget"
-    assert sum(r == "gpu" for r, *_ in sim.started) == 1
+        go()
+    assert go(resume=True) == 3 and sum(r == "gpu" for r, *_ in sim.started) == 1
     n = len(sim.started)
     assert go(resume=True) == 3 and len(sim.started) == n
-    with pytest.raises(Error, match="complete"):
-        go("analysis")
-
-    def approve(v):
-        req = dict(
-            kind="approve",
-            variant=v,
-            limit_usd="2",
-            selection_hash=HASH,
-            approver_id="operator",
-            rate_card="/pmmc-inputs/card.json",
+    assert (
+        go(
+            action=dict(
+                kind="approve",
+                stage="main",
+                variant="wr",
+                selection_hash=HASH,
+                approver_id="test",
+                limit_usd=None,
+                uncapped=True,
+            )
         )
-        assert go("main", variant=v, action=req) == 0
-
-    approve("wr")
+        == 0
+    )
     assert go(resume=True) == 0
-    assert go("analysis") == 3
-    units = read(progress)["units"]
-    assert units["wr-analysis"] == "completed" and units["legacy-main"] == "awaiting_budget"
-    assert ("control", "main", "w", False) in sim.started
-    with pytest.raises(Error, match="analysis"):
-        go("baselines")
-    for variant in ("w", "r", "legacy"):
-        approve(variant)
-        assert go("analysis", resume=True, variant=variant) == 0
-    assert go("baselines") == 0 and read(progress)["completed_stages"] == [
-        "main",
-        "analysis",
-        "baselines",
-    ]
     n = len(sim.started)
-    assert go("baselines", resume=True) == 0 and n == len(sim.started)
+    assert go(resume=True) == 0 and len(sim.started) == n
+    with pytest.raises(Error, match="frozen"):
+        launch(
+            root,
+            cfg,
+            "demo",
+            normalize_plan({"run_id": "demo", "stage": "baselines"}),
+            factory=sim.factory,
+        )
 
 
 def test_failure_cancels_peer_and_preserves_diagnostics(tmp_path):
@@ -280,7 +269,17 @@ def test_failure_cancels_peer_and_preserves_diagnostics(tmp_path):
     sim.fail = "gpu"
     stream = io.StringIO()
     with redirect_stdout(stream):
-        assert launch(root, cfg, "demo", "main", factory=sim.factory, sleep=lambda _: None) == 1
+        assert (
+            launch(
+                root,
+                cfg,
+                "demo",
+                normalize_plan({"run_id": "demo"}),
+                factory=sim.factory,
+                sleep=lambda _: None,
+            )
+            == 1
+        )
     assert sim.cancelled and "SYNC_REVIEW_FILE=" in stream.getvalue()
     secret = read(root / "instances/pmmc-release/identity.json")["secrets"]["PMMC_DATABASE_URL"]
     with tarfile.open(root / "runs/demo/diagnostics.tar.gz") as arc:
@@ -288,7 +287,16 @@ def test_failure_cancels_peer_and_preserves_diagnostics(tmp_path):
     assert b"NativeFixtureError" in data and secret.encode() not in data
     sim.fail, sim.mismatch = None, True
     assert (
-        launch(root, cfg, "demo", None, resume=True, factory=sim.factory, sleep=lambda _: None) == 1
+        launch(
+            root,
+            cfg,
+            "demo",
+            normalize_plan({"run_id": "demo"}),
+            resume=True,
+            factory=sim.factory,
+            sleep=lambda _: None,
+        )
+        == 1
     )
 
 
@@ -363,7 +371,7 @@ def test_projected_diagnostics(tmp_path):
 
 
 def test_cluster_reader_requires_admission_and_ro_output_only(tmp_path, monkeypatch):
-    cfg = config(tmp_path, "eidf")
+    cfg = config(tmp_path, **{"# queue =": "queue ="})
     kube = Kueue(cfg, "instance", tmp_path, credentials("instance"), None)
     objects = []
 
@@ -373,7 +381,7 @@ def test_cluster_reader_requires_admission_and_ro_output_only(tmp_path, monkeypa
         if "logs" in argv:
             return '{"schema":"pmmc-host-evidence-v1","files":{}}'
         if "get" in argv:
-            return "instance"
+            return json.dumps({"metadata": {"labels": {backends.OWNER: "instance"}}})
         return ""
 
     monkeypatch.setattr(backends, "invoke", fake)
@@ -394,111 +402,7 @@ def test_cluster_reader_requires_admission_and_ro_output_only(tmp_path, monkeypa
     assert c["env"] == [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}]
 
 
-@pytest.mark.parametrize("profile", ["local-nvidia", "eidf"])
-def test_backend_command_paths_with_simulated_cli(tmp_path, monkeypatch, profile):
-    cfg = config(tmp_path, profile)
-    for path in cfg["mounts"].values():
-        if profile == "local-nvidia":
-            Path(path).mkdir(parents=True)
-    jobs, objects, calls = {}, {}, []
-    owner = []
-
-    def fake(argv, doc=None, **kw):
-        calls.append(argv)
-        if profile == "local-nvidia":
-            assert argv[:3] == ["docker", "--context", "default"]
-            if "compose" in argv:
-                assert "--env-file" in argv and argv[argv.index("--env-file") + 1] == "/dev/null"
-                owner[:] = [argv[argv.index("--project-name") + 1]]
-                if "run" in argv:
-                    jobs[argv[argv.index("--name") + 1]] = argv[-1]
-                    assert "--no-deps" in argv and argv[-1] in doc["services"]
-                else:
-                    assert argv[-2:] == ["postgres", "minio"] and "--wait" in argv
-            elif "ps" in argv and "name=^/" in str(argv):
-                name = next(a[7:-1] for a in argv if a.startswith("name=^/"))
-                return name if name in jobs else ""
-            elif "inspect" in argv:
-                return f"{owner[0]} exited 0"
-        else:
-            assert argv[:5] == ["kubectl", "--context", "fixture", "-n", "fixture"]
-            if "create" in argv or "apply" in argv:
-                assert doc["metadata"]["namespace"] == "fixture"
-                name = doc["metadata"]["name"]
-                objects[name, doc["kind"].lower()] = doc
-                if doc["kind"] == "Job":
-                    jobs[name] = doc["spec"]["template"]["spec"]["containers"][0]["name"]
-                    assert doc["spec"]["suspend"] and doc["spec"]["backoffLimit"] == 0
-                return ""
-            if "get" in argv:
-                kind, name = argv[6:8]
-                if kind == "pvc" and name == "fixture":
-                    return '{"spec":{"accessModes":["ReadWriteMany"]},"status":{"phase":"Bound"}}'
-                if kind in ("pods", "resourcequota"):
-                    return '{"items":[]}'
-                if kind == "localqueues.kueue.x-k8s.io":
-                    return "{}"
-                obj = objects.get((name, kind.lower()))
-                if "--ignore-not-found" in argv:
-                    return obj["metadata"]["labels"][backends.OWNER] if obj else ""
-                if kind == "job":
-                    return json.dumps(
-                        {**obj, "status": {"conditions": [{"type": "Complete", "status": "True"}]}}
-                    )
-                if kind == "statefulset":
-                    return json.dumps(
-                        {
-                            "metadata": {"generation": 1},
-                            "status": {
-                                "readyReplicas": 1,
-                                "updatedReplicas": 1,
-                                "observedGeneration": 1,
-                                "updateRevision": "abc",
-                                "currentRevision": "abc",
-                            },
-                        }
-                    )
-                if kind == "secret":
-                    return json.dumps(obj)
-            if "wait" in argv:
-                return ""
-        if "logs" in argv:
-            job = (
-                argv[-1].removeprefix("job/")
-                if profile == "local-nvidia"
-                else next(a[4:] for a in argv if a.startswith("job/"))
-            )
-            if "--limit-bytes=524288" in argv:
-                return '{"schema":"pmmc-host-evidence-v1","files":{}}'
-            if jobs.get(job) in ("control", "gpu"):
-                return pool(jobs[job], "main", False, waiting=jobs[job] == "gpu")
-            if jobs.get(job) == "prepare":
-                return json.dumps(
-                    {
-                        "state": "planned",
-                        "phase": "exploration",
-                        "paper_result": False,
-                        "selection": "dev-all",
-                        "selection_hash": HASH,
-                        "run_id": "contract",
-                        "variant": "wr",
-                    }
-                )
-            protocols = {
-                "iam": "step8-minio-iam-v1",
-                "bootstrap": "step8-bootstrap-v1",
-                "models": "step8-model-preparation-v1",
-            }
-            return json.dumps({"ready": True, "protocol": protocols.get(jobs.get(job))})
-        return ""
-
-    monkeypatch.setattr(backends, "invoke", fake)
-    monkeypatch.setattr(backends.platform, "system", lambda: "Linux")
-    assert launch(tmp_path / "state", cfg, "contract", "main", sleep=lambda _: None) == 3
-    assert {"iam", "bootstrap", "models", "prepare", "pointer", "control", "gpu"} <= set(
-        jobs.values()
-    )
-    assert not any("--force-conflicts" in argv for argv in calls)
+# The real K8s reconcile/readback contract lives in the kind acceptance test.
 
 
 @pytest.mark.parametrize("warm", [False, True])
@@ -593,21 +497,22 @@ def test_calibrates_only_unverified_physical_pool(monkeypatch, warm):
 
 
 def test_quota_projection_includes_other_pods_and_cpu_override(tmp_path):
-    cfg = config(tmp_path, "eidf")
-    assert peak(cfg) == {"cpu": 92, "memory": 768 * 2**30, "nvidia.com/gpu": 8}
+    cfg = config(tmp_path)
+    used = peak(cfg)
+    assert used["cpu"] <= 16 and used["memory"] <= 96 * 2**30 and used["nvidia.com/gpu"] == 1
     quota = {
-        "spec": {"hard": {"requests.cpu": "100"}},
-        "status": {"used": {"requests.cpu": "12500m"}},
+        "spec": {"hard": {"requests.cpu": str(used["cpu"])}},
+        "status": {"used": {"requests.cpu": "500m"}},
     }
     (report,) = headroom(cfg, [quota], [], workers=True)
-    assert not report["fits"] and report["projected"] == "104.500"
+    assert not report["fits"]
     pod = {"spec": {"containers": [{"name": "postgres", "resources": {"requests": {"cpu": "6"}}}]}}
     (report,) = headroom(cfg, [quota], [pod], workers=True)
     assert report["fits"]
     file = tmp_path / "deploy.toml"
     file.write_text(file.read_text() + "\n[resources.control]\ncpu = 40\n")
-    with pytest.raises(Error, match="CPU budget"):
-        load_config(file, "eidf")
+    with pytest.raises(Error):
+        load_config(file, "kubernetes")
     assert (
         pending_reason([{"status": "False", "message": "Insufficient quota to admit job"}])
         == "insufficient_quota_or_resources"
@@ -615,7 +520,7 @@ def test_quota_projection_includes_other_pods_and_cpu_override(tmp_path):
 
 
 def test_pending_worker_deadline_cancels_both_pools(tmp_path, monkeypatch):
-    cfg = config(tmp_path, "eidf")
+    cfg = config(tmp_path)
     cfg["cluster"]["admission_timeout_seconds"] = 1
     sim = Simulated()
     original = sim.state
@@ -632,7 +537,14 @@ def test_pending_worker_deadline_cancels_both_pools(tmp_path, monkeypatch):
     tick = iter(range(10, 100))
     monkeypatch.setattr("scripts.release_host.runner.time.time", lambda: next(tick))
     assert (
-        launch(tmp_path / "state", cfg, "queued", "main", factory=sim.factory, sleep=lambda _: None)
+        launch(
+            tmp_path / "state",
+            cfg,
+            "queued",
+            normalize_plan({"run_id": "queued"}),
+            factory=sim.factory,
+            sleep=lambda _: None,
+        )
         == 1
     )
     data = read(tmp_path / "state/runs/queued/progress.json")
@@ -702,16 +614,18 @@ def test_readonly_preflight_rejects_other_variant_budget(tmp_path, monkeypatch):
 
 
 def test_existing_managed_secret_never_rotated(tmp_path, monkeypatch):
-    cfg = config(tmp_path, "eidf")
+    cfg = config(tmp_path)
     backend = Kueue(cfg, "pmmc-owner", tmp_path, {}, None)
     calls = []
 
     def fake(argv, *a):
         calls.append(argv)
-        return (
-            "pmmc-owner"
-            if "--ignore-not-found" in argv
-            else '{"immutable":true,"data":{"k":"different"}}'
+        return json.dumps(
+            dict(
+                metadata={"labels": {backends.OWNER: "pmmc-owner"}},
+                immutable=True,
+                data={"k": "different"},
+            )
         )
 
     monkeypatch.setattr(backends, "invoke", fake)

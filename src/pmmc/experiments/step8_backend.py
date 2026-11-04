@@ -277,6 +277,23 @@ class ProductionComponentBackend:
 
     async def verify_recovery(self, job, upstream, receipt) -> None:
         """Recovery must not convert an uncommitted disk reference into authority."""
+        if job.release_stages and job.operation in {"primary_evaluate", "analysis_evaluate", "baseline_evaluate"}:
+            from pmmc.baselines.suite import baseline_suite_child_run_id
+            from pmmc.evaluation.step8_workflow import verify_selected_score_recovery
+            from pmmc.schemas import BaselineMethod
+
+            suite_id = self._parent_value(job, "suite_id")
+            standalone = job.operation == "baseline_evaluate"
+            run_id = (baseline_suite_child_run_id(suite_id, BaselineMethod(job.parameters["method"]))
+                      if standalone else self._parent_value(job, "query_executor_run_id"))
+            await verify_selected_score_recovery(
+                self.settings, receipt.output, campaign_id=self.campaign.campaign_id,
+                suite_id=suite_id, source_run_id=run_id, query_id=job.parameters["query_id"],
+                snapshot_id=job.parameters["snapshot_id"],
+                method_scope={"baseline_evaluate":"baseline", "primary_evaluate":"pmmc_main",
+                              "analysis_evaluate":"pmmc"}[job.operation],
+            )
+            return
         if self.campaign.phase.value != "exploration" or job.operation not in ("compiler", "adopt_questioner"):
             return
         from pmmc.experiments.release_compiler_reuse import REFERENCE, output_hash
@@ -825,6 +842,8 @@ class ProductionComponentBackend:
         from pmmc.schemas import BaselineMethod, BenchmarkSelection
 
         caption_only = scope.get("treatment") == "no_raw_image"
+        method = scope.get("method") if scope.get("standalone") else None
+        fallback_only = caption_only or scope.get("fallback_only")
         settings = self._answer_settings(str(scope["answer_model"]), caption_only=caption_only)
         manifest, path = await create_baseline_suite(
             settings=settings,
@@ -832,9 +851,11 @@ class ProductionComponentBackend:
             selection=BenchmarkSelection(
                 datasets=[DatasetName(scope["dataset"])], query_ids=[str(scope["query_id"])]
             ),
-            corpus_id=str(self._parent_value(job, "corpus_id")),
+            corpus_id=(None if method in {"full_context_captions", "full_context_raw_images"}
+                       else str(self._parent_value(job, "corpus_id"))),
             answer_model_alias=str(scope["answer_model"]),
-            methods=[BaselineMethod.NATIVE_MULTIMODAL_RAG] if caption_only else None,
+            methods=([BaselineMethod(method)] if method else
+                     [BaselineMethod.NATIVE_MULTIMODAL_RAG] if fallback_only else None),
             metadata={
                 "partition_id": self.campaign.partition_id,
                 "partition_role": "paper_test" if self.campaign.paper_result else "development",
@@ -843,7 +864,10 @@ class ProductionComponentBackend:
                 "answer_contract_version": "typed-answer-contract-v3",
                 "answer_prompt_version": "pmmc-answer-contract-v3",
                 "allow_memory_raw_images": not caption_only,
-                **({"internal_pmmc_fallback": True} if caption_only else {}),
+                **({"internal_pmmc_fallback": True} if fallback_only else {}),
+                **({"release_plan_hash": self.campaign.release_plan_hash,
+                    "release_campaign_id": self.campaign.campaign_id} if self.campaign.release_plan_hash else {}),
+                **({"standalone_method": method} if method else {}),
             },
         )
         return {"suite_id": manifest.suite_id, "suite_path": str(path)}
@@ -897,7 +921,8 @@ class ProductionComponentBackend:
             ),
             suite_id=suite_id,
             phase=RagRunPhase(phase),
-            methods=[BaselineMethod.NATIVE_MULTIMODAL_RAG] if native_only else None,
+            methods=([BaselineMethod.NATIVE_MULTIMODAL_RAG] if native_only else
+                     [BaselineMethod(scope["method"])] if scope.get("standalone") else None),
         )
         return {"suite_id": suite_id, "answer_phase": phase}
 
@@ -1012,12 +1037,15 @@ class ProductionComponentBackend:
         )
         suite_id = str(self._parent_value(job, "suite_id"))
         fallback_id = baseline_suite_child_run_id(suite_id, BaselineMethod.NATIVE_MULTIMODAL_RAG)
+        campaign_binding = ({"release_campaign_id": self.campaign.campaign_id}
+                            if self.campaign.release_plan_hash else {})
         run_id = (
             "step8-query-"
             + canonical_content_hash(
                 {
                     "protocol": self.campaign.protocol.content_hash,
                     "scope": scope,
+                    **campaign_binding,
                 }
             )[:24]
         )
@@ -1042,6 +1070,7 @@ class ProductionComponentBackend:
                 + canonical_content_hash(
                     {
                         "protocol": self.campaign.protocol.content_hash,
+                        **campaign_binding,
                         "scope": {
                             **scope,
                             "answer_model": self.campaign.protocol.answer_backbones[0],
@@ -1049,6 +1078,8 @@ class ProductionComponentBackend:
                     }
                 )[:24]
                 if scope["answer_model"] != self.campaign.protocol.answer_backbones[0]
+                and (self.config.release_request is None or self.campaign.protocol.answer_backbones[0]
+                     in self.config.release_request["models"])
                 else None
             ),
         )
@@ -1084,6 +1115,18 @@ class ProductionComponentBackend:
 
     async def _analysis_evaluate(self, job, scope):
         return await self._scoped_evaluate(job, scope, "pmmc")
+
+    async def _baseline_evaluate(self, job, scope):
+        from pmmc.baselines.suite import baseline_suite_child_run_id
+        from pmmc.evaluation.step8_workflow import evaluate_step8_query
+        from pmmc.schemas import BaselineMethod
+
+        suite_id = str(self._parent_value(job, "suite_id"))
+        return await evaluate_step8_query(
+            self.settings, self.campaign.campaign_id,
+            baseline_suite_child_run_id(suite_id, BaselineMethod(scope["method"])),
+            suite_id, str(scope["query_id"]), method_scope="baseline",
+        )
 
     async def _scoped_evaluate(self, job, scope, method_scope):
         from pmmc.evaluation.step8_workflow import evaluate_step8_query

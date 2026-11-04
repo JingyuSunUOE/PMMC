@@ -1,18 +1,17 @@
-"""Docker and Kubernetes adapters. Never forward CLI output into host diagnostics."""
+"""Kubernetes adapter. Never forward CLI output into host diagnostics."""
 
 import base64
+import hashlib
 import json
-import os
-import platform
 import re
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
-from .config import STAGES, TARGETS, Error, check
-from .evidence import collect, safe_log
-from .quota import headroom, peak, pending_reason
+from .config import RATE_FILES, SECRET_RATE_PATH, STAGES, TARGETS, Error, check, identifier
+from .evidence import safe_log
+from .quota import headroom, peak, pending_reason, quantity
 from .workloads import (
     GPU_ROLES,
     IAM_KEYS,
@@ -25,6 +24,79 @@ from .workloads import (
 
 OWNER = "pmmc-release-instance"
 IAM_DIR = "/var/run/secrets/pmmc-step8-minio"
+CREDENTIAL_UID = "release.pmmc.io/credential-uid"
+RATE_ROLES = ("quote", "approve", "control")
+
+
+def policy_mount(cfg, role):
+    return cfg.get("billing", {}).get("policy_secret") and role in RATE_ROLES
+
+
+def resolve_kubernetes_resources(cfg, *, roles=None):
+    from .discovery import resolve
+
+    return resolve(cfg, invoke, roles)
+
+
+def release_env(role, cfg, name, approval, request, stage):
+    env = environment(role, cfg, name, approval)
+    if request and "plan" in request:
+        env["PMMC_RELEASE_REQUEST"] = json.dumps(request["plan"], separators=(",", ":"))
+        env["PMMC_RELEASE_STAGE"] = stage
+        env["PMMC_RELEASE_VARIANT"] = request.get("variant", request["plan"]["variants"][0])
+    if role in (*GPU_ROLES, "prepare"):
+        env["PMMC_RELEASE_TOPOLOGY"] = json.dumps(native_topology(cfg), sort_keys=True)
+    if role in GPU_ROLES:
+        env["PMMC_RELEASE_MEASURE"] = "1" if cfg["models"]["calibrate"] else "0"
+    else:
+        env["NVIDIA_VISIBLE_DEVICES"] = "void"
+    if role == "assets":
+        env["PMMC_BENCHMARK_STAGING_ROOT"] = "/pmmc-stage"
+    if cfg.get("billing", {}).get("policy_secret"):
+        if role in RATE_ROLES:
+            env["PMMC_STEP8_RATE_CARD_PATH"] = SECRET_RATE_PATH
+        else:
+            # Native pointer/GPU workers verify the archived card, not this Secret.
+            env.pop("PMMC_STEP8_RATE_CARD_PATH", None)
+    return env
+
+
+def native_topology(cfg):
+    return {**cfg["topology"], "workers": cfg["resources"]["control"]["cpu"],
+            "source_profile": cfg["native"]["runtime_profile"]}
+
+
+def role_refs(role, cfg, approval, request):
+    if role == "analysis-report":
+        return {}
+    return secret_refs(role, cfg, approval, (request or {}).get("plan"))
+
+
+def report_subdir(run):
+    return "step8/exploration/" + identifier(run) + "/reports"
+
+
+def mount_options(cfg, role, run):
+    if role == "assets":
+        yield cfg["mounts"]["inputs"], "/pmmc-stage", False
+        return
+    for key, dest in TARGETS.items():
+        if role == "analysis-report" and key != "outputs":
+            continue
+        if key == "inputs" and policy_mount(cfg, role):
+            # Sibling mounts, not nested mounts inside a read-only PVC. Secret
+            # files need no placeholder or mutation in operator-owned inputs.
+            subtrees = {"benchmarks", *(p.removeprefix(dest + "/").split("/", 1)[0]
+                        for p in cfg["native"].values() if p.startswith(dest + "/"))} - set(RATE_FILES)
+            for subdir in sorted(subtrees):
+                yield cfg["mounts"][key] + "/" + subdir, dest + "/" + subdir, True
+            continue
+        yield cfg["mounts"][key], dest, (
+            role in ("analysis-report", "pointer") or key == "inputs" and role != "assets"
+        )
+    if role == "analysis-report":
+        subdir = "/" + report_subdir(run)
+        yield cfg["mounts"]["outputs"] + subdir, TARGETS["outputs"] + subdir, False
 
 
 def invoke(argv, document=None, *, timeout=120, stderr=False):
@@ -74,11 +146,22 @@ def receipt(role, line):
         raise ReceiptError(f"missing final JSON receipt from {role}") from exc
     if not isinstance(data, dict):
         raise ReceiptError(f"invalid {role} receipt")
-    if role in {"iam", "bootstrap", "models"}:
+    if role == "analysis-report":
+        if (data.get("protocol") != "pmmc-analysis-readout-v2"
+                or data.get("paper_result") is not False
+                or data.get("state") not in ("complete","missing_dependencies")
+                or not re.fullmatch(r"[a-f0-9]{64}",str(data.get("plan_hash","")))
+                or not isinstance(data.get("missing_units"),list)
+                or any(not re.fullmatch(r"(wr|w|r|legacy)-main|wr-analysis",u) for u in data["missing_units"])):
+            raise ReceiptError("invalid analysis source receipt")
+        return {k:data[k] for k in ("plan_hash","state","missing_units")}
+    if role in {"iam", "bootstrap", "models","assets","prepare-capacity"}:
         protocols = {
             "iam": ("step8-minio-iam-v1",),
             "bootstrap": ("step8-bootstrap-v1",),
             "models": ("step8-model-preparation-v1", "release-locked-cache-hit-v1"),
+            "assets": ("release-assets-v2",),
+            "prepare-capacity": ("release-capacity-v2",),
         }
         if data.get("ready") is not True or data.get("protocol") not in protocols[role]:
             raise ReceiptError(f"{role} did not report ready")
@@ -93,7 +176,7 @@ def receipt(role, line):
             or not re.fullmatch(r"[0-9a-f]{64}", data["selection_hash"])
         ):
             raise ReceiptError("invalid prepare receipt")
-        return {k: data.get(k) for k in ("run_id", "variant", "selection_hash")}
+        return {k: data.get(k) for k in ("run_id", "variant", "selection_hash", "release_plan_hash","selected")}
     if role in {"quote", "approve"}:
         fields = ["selection_hash", "rate_card_sha256"]
         if role == "approve":
@@ -105,17 +188,22 @@ def receipt(role, line):
         summary = {k: data[k] for k in fields}
         amount = r"[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
         if role == "approve":
-            if not isinstance(data.get("limit_usd"), str) or not re.fullmatch(
-                amount, data["limit_usd"]
-            ):
+            if not (data.get("budget_mode") == "uncapped" and data.get("limit_usd") is None
+                    or isinstance(data.get("limit_usd"),str) and re.fullmatch(amount,data["limit_usd"])):
                 raise ReceiptError("invalid approval amount")
             summary["limit_usd"] = data["limit_usd"]
-        else:
+        if "plan_hash" in data:
+            if not re.fullmatch(r"[a-f0-9]{64}",str(data["plan_hash"])):
+                raise ReceiptError("invalid plan approval")
+            summary["plan_hash"] = data["plan_hash"]
+        if role == "quote":
             if data.get("approval_created") is not False or data.get("scope") not in STAGES:
                 raise ReceiptError("invalid quote receipt")
             summary.update(scope=data["scope"], approval_created=False)
             for section in ("pending_scope", "pending_additional_after_preceding_scopes"):
                 estimates = data.get(section)
+                if section == "pending_additional_after_preceding_scopes" and data.get("schema")=="release-plan-api-estimate-v2":
+                    continue
                 summary[section] = {}
                 for key in ("standard_rate_scenario_usd", "one_pass_reservation_bound_usd"):
                     if not isinstance(estimates, dict) or key not in estimates:
@@ -141,7 +229,7 @@ def receipt(role, line):
         and re.fullmatch(r"[0-9a-f]{64}", data["scope_hash"])
         and (
             (state == "awaiting_budget" and done == n and not data["paid_authorized"])
-            or (state == "stage_complete" and done == n and data["paid_authorized"])
+            or (state == "stage_complete" and done == n)
             or (state == "waiting_for_workers" and role == "gpu" and done < n)
         )
     ):
@@ -152,215 +240,9 @@ def receipt(role, line):
     }
 
 
-class Compose:
-    def __init__(self, cfg, name, private, creds, approval, request=None):
-        self.cfg, self.name, self.private = cfg, name, private
-        self.creds, self.approval = creds, approval
-        self.request = request
-        self.docker = ["docker", "--context", "default"]
-
-    def manifest(self, role=None, run=None, stage=None):
-        cfg = self.cfg
-        services = {}
-        for service, volume, dest in [
-            ("postgres", "pgdata", "/var/lib/postgresql/data"),
-            ("minio", "s3data", "/data"),
-        ]:
-            services[service] = {
-                "image": cfg["images"][service],
-                "labels": {OWNER: self.name},
-                "restart": "unless-stopped",
-                "networks": {"default": {"aliases": [f"{self.name}-{service}"]}},
-                "volumes": [f"{volume}:{dest}"],
-                "environment": {
-                    k: self.creds[v] for k, v in secret_refs(service, cfg, None).items()
-                },
-            }
-        services["postgres"]["environment"].update(
-            POSTGRES_USER="pmmc_owner", POSTGRES_DB="pmmc", PGDATA="/var/lib/postgresql/data/pgdata"
-        )
-        services["minio"]["command"] = ["server", "/data"]
-        for service, test in [
-            ("postgres", ["pg_isready", "-U", "pmmc_owner", "-d", "pmmc"]),
-            ("minio", ["curl", "-fsS", "http://localhost:9000/minio/health/ready"]),
-        ]:
-            services[service]["healthcheck"] = {
-                "test": ["CMD", *test],
-                "interval": "5s",
-                "timeout": "5s",
-                "retries": 100,
-            }
-        if role:
-            env = environment(role, cfg, self.name, self.approval)
-            for key, source in secret_refs(role, cfg, self.approval).items():
-                value = self.creds.get(source) or os.environ.get(source)
-                check(value, f"missing credential {source}")
-                env[key] = value.replace("$", "$$")
-            job = services[role] = {
-                "image": cfg["images"]["iam" if role == "iam" else "app"],
-                "labels": {OWNER: self.name},
-                "working_dir": "/workspace",
-                "environment": env,
-                "entrypoint": command(role, cfg, run, stage, self.request),
-                "command": [],
-                "cap_drop": ["ALL"],
-                "security_opt": ["no-new-privileges:true"],
-            }
-            if role == "iam":
-                job.update(
-                    user=f"{os.getuid()}:{os.getgid()}",
-                    read_only=True,
-                    tmpfs=["/tmp"],
-                    volumes=[f"{self.private / 'iam'}:{IAM_DIR}:ro"],
-                )
-            else:
-                job["user"] = f"{cfg['identity']['uid']}:{cfg['identity']['gid']}"
-                job["volumes"] = [
-                    {
-                        "type": "bind",
-                        "source": cfg["mounts"][k],
-                        "target": dest,
-                        "read_only": k == "inputs" or role == "pointer",
-                        "bind": {"create_host_path": False},
-                    }
-                    for k, dest in TARGETS.items()
-                ]
-            if role in GPU_ROLES:
-                env["PMMC_LOCAL_SCRATCH_DIR"] = "/tmp/pmmc-scratch"
-                env["PMMC_TOKEN_COUNTER_CACHE_DIR"] = "/tmp/pmmc-scratch/token-counter"
-                job.update(
-                    shm_size="64gb",
-                    deploy={
-                        "resources": {
-                            "reservations": {
-                                "devices": [
-                                    {"driver": "nvidia", "count": 8, "capabilities": ["gpu"]}
-                                ]
-                            }
-                        }
-                    },
-                )
-        for role, spec in services.items():
-            r = cfg["resources"][role]
-            spec.update(cpus=r["cpu"], mem_limit=f"{r['memory_gib']}g")
-        return {"services": services, "volumes": {"pgdata": {}, "s3data": {}}}
-
-    def compose(self, manifest, *args):
-        return invoke(
-            [
-                *self.docker,
-                "compose",
-                "--project-name",
-                self.name,
-                "--env-file",
-                "/dev/null",
-                "-f",
-                "-",
-                *args,
-            ],
-            manifest,
-            timeout=900,
-        )
-
-    def reconcile(self):
-        check(platform.system() == "Linux", "local-nvidia requires a Linux host")
-        check(
-            all(Path(p).is_dir() for p in self.cfg["mounts"].values()),
-            "pre-create the four dedicated bind mount directories",
-        )
-        folder = self.private / "iam"
-        folder.mkdir(exist_ok=True, mode=0o700)
-        for k in IAM_KEYS:
-            path = folder / k
-            if not path.exists():
-                path.write_text(self.creds[k])
-            check(path.read_text() == self.creds[k], "local IAM file mismatch")
-        self.compose(
-            self.manifest(), "up", "-d", "--wait", "--wait-timeout", "600", "postgres", "minio"
-        )
-
-    def start(self, job, role, run, stage):
-        self.compose(
-            self.manifest(role, run, stage),
-            "run",
-            "--no-deps",
-            "--detach",
-            "-T",
-            "--name",
-            job,
-            role,
-        )
-
-    def state(self, job):
-        if not invoke(
-            [*self.docker, "ps", "-a", "--filter", f"name=^/{job}$", "--format", "{{.Names}}"]
-        ):
-            return "missing"
-        info = invoke(
-            [
-                *self.docker,
-                "inspect",
-                "--type",
-                "container",
-                "--format",
-                '{{ index .Config.Labels "pmmc-release-instance" }} '
-                "{{.State.Status}} {{.State.ExitCode}}",
-                job,
-            ]
-        ).split()
-        check(len(info) == 3 and info[0] == self.name, "foreign or malformed Compose job")
-        if info[1] == "exited":
-            return "complete" if info[2] == "0" else "failed"
-        return "failed" if info[1] in ("dead", "removing") else "running"
-
-    def outcome(self, job, role):
-        if role == "pointer":
-            return "complete"
-        # Native final JSON is stdout. Docker sends stderr to a separate stream.
-        return receipt(role, invoke([*self.docker, "logs", "--tail", "1", job]))
-
-    def stop(self, job):
-        invoke([*self.docker, "stop", "--time", "30", job])
-
-    def evidence(self, run, variant):
-        return collect(Path(self.cfg["mounts"]["outputs"]), run, variant)
-
-    def tail(self, job):
-        return safe_log(invoke([*self.docker, "logs", "--tail", "64", job], stderr=True))
-
-    def health(self):
-        rows = []
-        for service in ("postgres", "minio"):
-            ids = invoke(
-                [
-                    *self.docker,
-                    "ps",
-                    "-aq",
-                    "--filter",
-                    f"label=com.docker.compose.project={self.name}",
-                    "--filter",
-                    f"label=com.docker.compose.service={service}",
-                ]
-            ).split()[:2]
-            for cid in ids:
-                health = invoke(
-                    [
-                        *self.docker,
-                        "inspect",
-                        "--format",
-                        "{{.State.Status}} {{.State.ExitCode}} {{.State.Health.Status}}",
-                        cid,
-                    ]
-                )
-                if re.fullmatch(
-                    r"(running|exited|created|dead|restarting) \d+ (healthy|unhealthy|starting)",
-                    health,
-                ):
-                    rows.append({"service": service, "state": health})
-        return rows
 
 
-class Kueue:
+class Kubernetes:
     def __init__(self, cfg, name, private, creds, approval, request=None):
         self.cfg, self.name, self.creds, self.approval = cfg, name, creds, approval
         self.request = request
@@ -376,7 +258,7 @@ class Kueue:
     def obj(self, kind, name, spec=None, *, queued=False):
         version = {"Job": "batch/v1", "StatefulSet": "apps/v1"}.get(kind, "v1")
         labels = {OWNER: self.name}
-        if queued:
+        if queued and self.cluster.get("queue"):
             labels["kueue.x-k8s.io/queue-name"] = self.cluster["queue"]
         obj = {
             "apiVersion": version,
@@ -387,36 +269,65 @@ class Kueue:
             obj["spec"] = spec
         return obj
 
-    def owned(self, kind, name):
-        label = invoke(
-            [
-                *self.kube,
-                "get",
-                kind,
-                name,
-                "--ignore-not-found",
-                "-o",
-                'go-template={{index .metadata.labels "pmmc-release-instance"}}',
-            ]
+    def existing(self, kind, name):
+        raw = invoke([*self.kube, "get", kind, name, "--ignore-not-found", "-o", "json"])
+        if not raw:
+            return None
+        obj = json.loads(raw)
+        meta = obj.get("metadata", {})
+        check(
+            meta.get("labels", {}).get(OWNER) == self.name and not meta.get("deletionTimestamp"),
+            "refusing to adopt a foreign or terminating cluster resource",
         )
-        check(label in ("", self.name), "refusing to adopt a foreign cluster resource")
-        return bool(label)
+        return obj
 
-    def ensure(self, obj):
-        kind, name = obj["kind"], obj["metadata"]["name"]
-        if not self.owned(kind, name):
-            invoke([*self.kube, "create", "-f", "-"], obj)
-        elif kind == "Secret":
-            stored = json.loads(invoke([*self.kube, "get", "secret", name, "-o", "json"]))
+    def owned(self, kind, name):
+        return self.existing(kind, name) is not None
+
+    def validate_existing(self, obj, stored):
+        kind = obj["kind"]
+        if kind == "Secret":
             check(
                 stored.get("immutable") is True and stored.get("data") == obj["data"],
                 "existing managed Secret differs from host identity; refusing rotation",
             )
-        else:
-            invoke(
-                [*self.kube, "apply", "--server-side", "--field-manager=pmmc-release", "-f", "-"],
-                obj,
+        if kind == "PersistentVolumeClaim":
+            existing, expected = stored["spec"], obj["spec"]
+            uid = obj["metadata"].get("annotations", {}).get(CREDENTIAL_UID)
+            check(
+                uid and stored["metadata"].get("annotations", {}).get(CREDENTIAL_UID) == uid,
+                "existing data PVC belongs to a different credential identity",
             )
+            check(
+                existing.get("accessModes") == expected["accessModes"]
+                and existing.get("volumeMode", "Filesystem") == "Filesystem"
+                and existing.get("storageClassName") == expected["storageClassName"]
+                and quantity(existing["resources"]["requests"]["storage"])
+                == quantity(expected["resources"]["requests"]["storage"])
+                and stored.get("status", {}).get("phase") in ("Pending", "Bound"),
+                "existing PVC differs from the requested storage contract",
+            )
+
+    def ensure(self, obj):
+        kind, name = obj["kind"], obj["metadata"]["name"]
+        stored = self.existing(kind, name)
+        if stored is None:
+            invoke([*self.kube, "create", "-f", "-"], obj)
+        else:
+            self.validate_existing(obj, stored)
+            if kind not in {"Secret", "PersistentVolumeClaim"}:
+                obj["metadata"]["resourceVersion"] = stored["metadata"]["resourceVersion"]
+                invoke(
+                    [
+                        *self.kube,
+                        "apply",
+                        "--server-side",
+                        "--field-manager=pmmc-release",
+                        "-f",
+                        "-",
+                    ],
+                    obj,
+                )
 
     def secret(self, key):
         if key in PROVIDER:
@@ -428,14 +339,15 @@ class Kueue:
     def refs(self, role):
         return [
             {"name": k, "valueFrom": {"secretKeyRef": {"name": self.secret(src), "key": src}}}
-            for k, src in secret_refs(role, self.cfg, self.approval).items()
+            for k, src in role_refs(role, self.cfg, self.approval, self.request).items()
         ]
 
     def resources(self, role):
         r = self.cfg["resources"][role]
         spec = {"cpu": str(r["cpu"]), "memory": f"{r['memory_gib']}Gi"}
         if role in GPU_ROLES:
-            spec["nvidia.com/gpu"] = "8"
+            check(self.cfg["topology"]["gpus"] > 0, "GPU workload requires a nonzero GPU total")
+            spec["nvidia.com/gpu"] = str(self.cfg["topology"]["gpus"])
         return {"requests": spec, "limits": spec}
 
     def service_objects(self, role):
@@ -449,7 +361,7 @@ class Kueue:
             {
                 "accessModes": ["ReadWriteOnce"],
                 "storageClassName": self.cluster["storage_class"],
-                "resources": {"requests": {"storage": "300Gi" if pg else "120Gi"}},
+                "resources": {"requests": {"storage": f"{self.cluster[role + '_storage_gib']}Gi"}},
             },
         )
         svc = self.obj(
@@ -462,10 +374,11 @@ class Kueue:
             "enableServiceLinks": False,
             "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": name}}],
         }
+        self.place(pod)
         container = {
             "name": role,
             "image": self.cfg["images"][role],
-            "env": self.refs(role),
+            "env": [*self.refs(role), {"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}],
             "ports": [{"containerPort": port}],
             "resources": self.resources(role),
             "volumeMounts": [
@@ -479,6 +392,7 @@ class Kueue:
                     "POSTGRES_USER": "pmmc_owner",
                     "POSTGRES_DB": "pmmc",
                     "PGDATA": "/var/lib/postgresql/data/pgdata",
+                    "PMMC_RELEASE_BOOTSTRAP_ROLES": "1",
                 }.items()
             )
             container["readinessProbe"] = {
@@ -504,7 +418,17 @@ class Kueue:
         sts["spec"]["template"]["metadata"]["labels"] = {**sts["metadata"]["labels"], **selector}
         return pvc, svc, sts
 
-    def reconcile(self):
+    def place(self, pod, *, workload=False):
+        if pulls := self.cluster.get("image_pull_secrets"):
+            pod["imagePullSecrets"] = [{"name": secret} for secret in pulls]
+        selected = self.cfg["resource_policy"].get("node_hostname") if workload else None
+        pod["nodeSelector"] = {"kubernetes.io/os": "linux", **self.cluster.get("node_selector", {})}
+        if host := selected or self.cluster.get("node_hostname"):
+            pod["nodeSelector"]["kubernetes.io/hostname"] = host
+        if tolerations := self.cluster.get("tolerations"):
+            pod["tolerations"] = [dict(t) for t in tolerations]
+
+    def reconcile_reader(self):
         claim = json.loads(
             invoke(
                 [
@@ -518,23 +442,182 @@ class Kueue:
             )
         )
         check(
-            "ReadWriteMany" in claim["spec"]["accessModes"] and claim["status"]["phase"] == "Bound",
-            "shared PVC must be Bound with ReadWriteMany access",
+            self.cluster["shared_access_mode"] in claim["spec"]["accessModes"]
+            and claim["spec"].get("volumeMode", "Filesystem") == "Filesystem"
+            and not claim.get("metadata", {}).get("deletionTimestamp")
+            and claim.get("status", {}).get("phase") in ("Pending", "Bound"),
+            "shared PVC does not satisfy the configured access mode, or is unavailable",
         )
-        self.check_quota()
+        meta = claim.get("metadata", {})
+        check(
+            meta.get("labels", {}).get(OWNER) in (None, self.name),
+            "shared PVC is owned by a different instance",
+        )
+        if self.cluster.get("create_shared_pvc"):
+            check(
+                meta.get("labels", {}).get(OWNER) == self.name
+                and meta.get("annotations", {}).get(CREDENTIAL_UID),
+                "foreign managed shared PVC",
+            )
+            expected = self.shared_claim()
+            expected["metadata"]["annotations"] = {
+                CREDENTIAL_UID: meta["annotations"][CREDENTIAL_UID]
+            }
+            self.validate_existing(expected, claim)
+
+    def shared_claim(self):
+        return self.obj(
+            "PersistentVolumeClaim",
+            self.cluster["shared_pvc"],
+            {
+                "accessModes": [self.cluster["shared_access_mode"]],
+                "storageClassName": self.cluster["shared_storage_class"],
+                "resources": {"requests": {"storage": f"{self.cluster['shared_storage_gib']}Gi"}},
+            },
+        )
+
+    def ensure_layout(self, claim):
+        uid = claim["metadata"]["uid"]
+        identity = self.cfg["identity"]
+        paths = sorted(self.cfg["mounts"].values())
+        args = [str(identity["uid"]), str(identity["gid"]), json.dumps(paths)]
+        script = Path(__file__).with_name("volume_layout.py").read_text()
+        image = self.cfg["images"]["app"]
+        digest = hashlib.sha256(json.dumps([uid, args, image, script]).encode()).hexdigest()
+        name = self.name + "-layout-" + digest[:12]
+        container = {
+            "name": "verify-layout",
+            "image": image,
+            "env": [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}],
+            "command": ["python", "-B", "-c", script, "verify", *args],
+            "resources": self.resources("bootstrap"),
+            "volumeMounts": [{"name": "shared", "mountPath": "/layout"}],
+            "securityContext": {
+                "runAsNonRoot": True,
+                "runAsUser": identity["uid"],
+                "runAsGroup": identity["gid"],
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {"drop": ["ALL"]},
+            },
+        }
+        init = {
+            **container,
+            "name": "create-layout",
+            "command": ["python", "-B", "-c", script, "create", *args],
+            "securityContext": {
+                **container["securityContext"],
+                "runAsUser": 0,
+                "runAsGroup": 0,
+                "runAsNonRoot": False,
+                "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
+            },
+        }
+        pod = {
+            "automountServiceAccountToken": False,
+            "enableServiceLinks": False,
+            "restartPolicy": "Never",
+            "volumes": [
+                {
+                    "name": "shared",
+                    "persistentVolumeClaim": {"claimName": self.cluster["shared_pvc"]},
+                }
+            ],
+            "initContainers": [init],
+            "containers": [container],
+        }
+        self.place(pod, workload=True)
+        job = self.obj(
+            "Job",
+            name,
+            {
+                "backoffLimit": 0,
+                "suspend": bool(self.cluster.get("queue")),
+                "template": {"metadata": {"labels": {OWNER: self.name}}, "spec": pod},
+            },
+            queued=True,
+        )
+        job["metadata"]["annotations"] = {"release.pmmc.io/layout": digest}
+        current = self.existing("Job", name)
+        if current is None:
+            invoke([*self.kube, "create", "-f", "-"], job)
+        else:
+            check(
+                current["metadata"].get("annotations", {}).get("release.pmmc.io/layout") == digest,
+                "managed storage layout Job identity mismatch",
+            )
+            check(
+                not current.get("status", {}).get("failed"),
+                "managed storage layout previously failed",
+            )
+        seconds = self.cluster["admission_timeout_seconds"]
+        invoke(
+            [
+                *self.kube,
+                "wait",
+                "--for=condition=complete",
+                f"--timeout={seconds}s",
+                "job/" + name,
+            ],
+            timeout=seconds + 15,
+        )
+
+    def reconcile(self):
+        managed = self.cluster.get("create_shared_pvc")
+        if not managed:
+            self.reconcile_reader()
+        self.check_quota(roles=("bootstrap",) if managed else ())
         secret = self.obj("Secret", self.secret(IAM_KEYS[0]))
         secret.update(
             immutable=True,
             type="Opaque",
             data={k: base64.b64encode(v.encode()).decode() for k, v in self.creds.items()},
         )
+        stored = self.existing("Secret", secret["metadata"]["name"])
+        services = [obj for role in ("postgres", "minio") for obj in self.service_objects(role)]
+        if managed:
+            services.insert(0, self.shared_claim())
+        if stored is not None:
+            self.validate_existing(secret, stored)
+        # Validate all pre-existing objects before any writes. Never create a
+        # fresh credential identity over old data, even if the owner label matches.
+        found = set()
+        for obj in services:
+            existing = self.existing(obj["kind"], obj["metadata"]["name"])
+            if existing is not None:
+                found.add((obj["kind"], obj["metadata"]["name"]))
+                check(stored is not None, "service exists without its original credential Secret")
+                if obj["kind"] == "PersistentVolumeClaim":
+                    obj["metadata"]["annotations"] = {CREDENTIAL_UID: stored["metadata"]["uid"]}
+                self.validate_existing(obj, existing)
+        for kind, name in found:
+            if kind == "StatefulSet":
+                check(
+                    ("PersistentVolumeClaim", name) in found,
+                    "existing service StatefulSet is missing its data PVC",
+                )
         self.ensure(secret)
-        for role in ("postgres", "minio"):
-            for obj in self.service_objects(role):
-                self.ensure(obj)
+        stored = self.existing("Secret", secret["metadata"]["name"])
+        check(stored is not None and stored["metadata"].get("uid"), "credential Secret UID missing")
+        self.validate_existing(secret, stored)
+        for obj in services:
+            if obj["kind"] == "PersistentVolumeClaim":
+                obj["metadata"]["annotations"] = {CREDENTIAL_UID: stored["metadata"]["uid"]}
+            self.ensure(obj)
+            if (
+                managed
+                and obj["kind"] == "PersistentVolumeClaim"
+                and obj["metadata"]["name"] == self.cluster["shared_pvc"]
+            ):
+                claim = self.existing("PersistentVolumeClaim", self.cluster["shared_pvc"])
+                check(claim is not None, "managed shared PVC disappeared")
+                self.validate_existing(obj, claim)
+                self.ensure_layout(claim)
         self.wait_services()
 
-    def check_quota(self):
+    def check_queue(self):
+        if not self.cluster.get("queue"):
+            return
         queue = json.loads(
             invoke(
                 [
@@ -554,18 +637,49 @@ class Kueue:
             ),
             "Kueue LocalQueue inactive",
         )
+
+    def check_quota(self, *, roles=None, services=True):
+        from .discovery import held_service
+
+        self.check_queue()
+        paired = (
+            roles
+            and set(roles).intersection(("gpu", "control"))
+            and (self.request or {}).get("kind") == "run"
+        )
+        sizing_roles = ("control", "gpu") if paired else roles
+        wanted = peak(self.cfg, roles=sizing_roles, services=services)
+        bounds = self.cfg["topology"]
+        check(
+            wanted["cpu"] <= bounds["cpus"] and wanted["memory"] <= bounds["memory_gib"] * 2**30,
+            "phase exceeds frozen CPU or memory ceiling",
+        )
+        if wanted["nvidia.com/gpu"]:
+            check(
+                all(
+                    self.cfg["resources"][role]["cpu"] >= bounds["gpus"]
+                    for role in set(sizing_roles or GPU_ROLES).intersection(GPU_ROLES)
+                ),
+                "insufficient frozen CPU allocation for requested GPU replicas",
+            )
+        if paired and roles == ("control",):
+            roles = sizing_roles
         quotas = json.loads(invoke([*self.kube, "get", "resourcequota", "-o", "json"]))["items"]
         pods = json.loads(
             invoke([*self.kube, "get", "pods", "-l", f"{OWNER}={self.name}", "-o", "json"])
         )["items"]
-        workers = not self.request or self.request["kind"] == "run"
         try:
-            limits = headroom(self.cfg, quotas, pods, workers=workers)
+            limits = headroom(self.cfg, quotas, [p for p in pods if held_service(self.cfg, p)],
+                              roles=roles, services=services)
         except ValueError as exc:
             raise Error("namespace ResourceQuota not comparable; inspect before launch") from exc
         self.quota = {
-            "queue": self.cluster["queue"],
-            "peak": peak(self.cfg, workers),
+            "queue": self.cluster.get("queue"),
+            "peak": peak(self.cfg, roles=roles, services=services),
+            "node_hostname": self.cfg["resource_policy"].get(
+                "node_hostname", self.cluster.get("node_hostname")
+            ),
+            "resource_source": self.cfg["resource_policy"]["source"],
             "limits": limits,
         }
         print("PMMC_ADMISSION " + json.dumps(self.quota), flush=True)
@@ -599,6 +713,8 @@ class Kueue:
             time.sleep(min(15, left))
 
     def workload_reason(self, name):
+        if not self.cluster.get("queue"):
+            return "awaiting_pod_or_storage"
         workloads = json.loads(
             invoke([*self.kube, "get", "workloads.kueue.x-k8s.io", "-o", "json"])
         )
@@ -614,6 +730,9 @@ class Kueue:
         return "awaiting_workload_or_pod"
 
     def manifest(self, job, role, run, stage):
+        if policy_mount(self.cfg, role) and role in ("quote", "approve"):
+            check((self.request or {}).get("rate_card") == SECRET_RATE_PATH,
+                  "rate-card override conflicts with the configured billing Secret")
         volumes, mounts = [], []
         pod = {
             "restartPolicy": "Never",
@@ -621,7 +740,8 @@ class Kueue:
             "enableServiceLinks": False,
             "volumes": volumes,
         }
-        env = environment(role, self.cfg, self.name, self.approval)
+        self.place(pod, workload=True)
+        env = release_env(role, self.cfg, self.name, self.approval, self.request, stage)
         container = {
             "name": role,
             "image": self.cfg["images"]["iam" if role == "iam" else "app"],
@@ -674,17 +794,61 @@ class Kueue:
             mounts.extend(
                 {
                     "name": "shared",
-                    "subPath": self.cfg["mounts"][k],
+                    "subPath": source,
                     "mountPath": dest,
-                    "readOnly": k == "inputs" or role == "pointer",
+                    "readOnly": readonly,
                 }
-                for k, dest in TARGETS.items()
+                for source, dest, readonly in mount_options(self.cfg, role, run)
             )
+            if role == "analysis-report":
+                pod["initContainers"] = [
+                    {
+                        "name": "report-directory",
+                        "image": container["image"],
+                        "env": [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}],
+                        "command": [
+                            "python",
+                            "-B",
+                            "-c",
+                            Path(__file__).with_name("volume_layout.py").read_text(),
+                            "report",
+                            report_subdir(run),
+                        ],
+                        "resources": container["resources"],
+                        "securityContext": {
+                            **container["securityContext"],
+                            "readOnlyRootFilesystem": True,
+                        },
+                        "volumeMounts": [
+                            {
+                                "name": "shared",
+                                "mountPath": "/layout",
+                                "subPath": self.cfg["mounts"]["outputs"],
+                            }
+                        ],
+                    }
+                ]
+                container["securityContext"]["readOnlyRootFilesystem"] = True
+                volumes.append({"name": "tmp", "emptyDir": {}})
+                mounts.append({"name": "tmp", "mountPath": "/tmp"})
+        if policy_mount(self.cfg, role):
+            volumes.append({"name": "rates", "secret": {
+                "secretName": self.cfg["instance"] + "-rates", "defaultMode": 0o444,
+                "items": [{"key": k, "path": k} for k in RATE_FILES],
+            }})
+            mounts.extend({"name": "rates", "subPath": k, "mountPath": TARGETS["inputs"] + "/" + k,
+                           "readOnly": True} for k in RATE_FILES)
         if role in GPU_ROLES:
-            pod["nodeSelector"] = {"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"}
             for name, path, spec in [
-                ("scratch", "/pmmc-scratch", {"sizeLimit": "300Gi"}),
-                ("shm", "/dev/shm", {"medium": "Memory", "sizeLimit": "64Gi"}),
+                ("scratch", "/pmmc-scratch", {}),
+                (
+                    "shm",
+                    "/dev/shm",
+                    {
+                        "medium": "Memory",
+                        "sizeLimit": f"{max(1, min(64, self.cfg['resources'][role]['memory_gib'] // 4))}Gi",
+                    },
+                ),
             ]:
                 volumes.append({"name": name, "emptyDir": spec})
                 mounts.append({"name": name, "mountPath": path})
@@ -692,7 +856,7 @@ class Kueue:
             "Job",
             job,
             {
-                "suspend": True,
+                "suspend": bool(self.cluster.get("queue")),
                 "backoffLimit": 0,
                 "activeDeadlineSeconds": 604800,
                 "template": {"metadata": {}, "spec": pod},
@@ -703,13 +867,16 @@ class Kueue:
         return obj
 
     def start(self, job, role, run, stage):
-        if role == "control":
-            self.check_quota()
-        for external in {
-            self.secret(k)
-            for k in secret_refs(role, self.cfg, self.approval).values()
-            if k in (*PROVIDER, "HF_TOKEN")
-        }:
+        # Count active peers through ResourceQuota.used. Never charge CPU-only
+        # stages for a future hypothetical GPU worker.
+        self.check_quota(roles=(role,), services=role != "analysis-report")
+        external_keys = {}
+        for key in role_refs(role, self.cfg, self.approval, self.request).values():
+            if key in (*PROVIDER, "HF_TOKEN"):
+                external_keys.setdefault(self.secret(key), set()).add(key)
+        if policy_mount(self.cfg, role):
+            external_keys[self.cfg["instance"] + "-rates"] = set(RATE_FILES)
+        for external, required in external_keys.items():
             keys = invoke(
                 [
                     *self.kube,
@@ -720,14 +887,9 @@ class Kueue:
                     "go-template={{range $key,$val := .data}}{{$key}} {{end}}",
                 ]
             ).split()
-            required = [
-                k
-                for k in secret_refs(role, self.cfg, self.approval).values()
-                if self.secret(k) == external
-            ]
             check(
-                set(required) <= set(keys),
-                "external provider/model Secret is missing required keys",
+                required <= set(keys),
+                "external workload Secret is missing required keys",
             )
         invoke([*self.kube, "create", "-f", "-"], self.manifest(job, role, run, stage))
 
@@ -793,6 +955,23 @@ class Kueue:
             invoke([*self.kube, "get", "pods", "-l", f"{OWNER}={self.name}", "-o", "json"])
         )
         rows = []
+        for role in ("postgres", "minio"):
+            name = f"{self.name}-{role}"
+            sts = self.existing("StatefulSet", name)
+            pvc = self.existing("PersistentVolumeClaim", name)
+            status = (sts or {}).get("status", {})
+            phase = (pvc or {}).get("status", {}).get("phase")
+            rows.append(
+                {
+                    "service": role,
+                    "state": "missing"
+                    if sts is None
+                    else "ready"
+                    if status.get("readyReplicas") == 1
+                    else "pending",
+                    "pvc": phase if phase in ("Bound", "Pending", "Lost") else "missing",
+                }
+            )
         reasons = {
             "Completed",
             "Error",
@@ -829,7 +1008,7 @@ class Kueue:
         return rows
 
     def evidence(self, run, variant):
-        # The host need not have filesystem access to the EIDF shared claim.
+        # The host need not have filesystem access to the shared claim.
         job = self.name + "-review-" + uuid.uuid4().hex[:10]
         obj = self.manifest(job, "pointer", run, "main")
         spec = obj["spec"]["template"]["spec"]
@@ -848,7 +1027,9 @@ class Kueue:
         ]
         spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
         obj["spec"].update(activeDeadlineSeconds=120, ttlSecondsAfterFinished=600)
-        print(f"PMMC_REVIEW_WAIT job={job} queue={self.cluster['queue']} timeout=120s", flush=True)
+        print(
+            f"PMMC_REVIEW_WAIT job={job} queue={self.cluster.get('queue')} timeout=120s", flush=True
+        )
         invoke([*self.kube, "create", "-f", "-"], obj)
         try:
             invoke(
@@ -864,3 +1045,6 @@ class Kueue:
         finally:
             # Also remove a reader that was never admitted. Do not touch workload Jobs or PVCs.
             self.stop(job)
+
+
+Kueue = Kubernetes

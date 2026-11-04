@@ -123,8 +123,8 @@ def record_campaign_exposure(output_root: Path, campaign_dir: Path) -> str:
         for selection in selections:
             _check(directory, manifest, selection)
         query_ids = {
-            dataset.value: sorted({q for s in selections for q in s.query_ids[dataset]})
-            for dataset in selections[0].query_ids
+            dataset.value: sorted({q for s in selections for q in s.query_ids.get(dataset, ())})
+            for dataset in (DatasetName.MEMLENS, DatasetName.MEMGALLERY)
         }
         event = {
             "protocol": "step8-exposure-event-v1",

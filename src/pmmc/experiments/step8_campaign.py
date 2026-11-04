@@ -143,7 +143,20 @@ def plan_campaign(
         freeze = MethodProtocolFreeze.model_validate_json(freeze_path.read_text())
         if freeze.decision != "approved" or freeze.protocol != protocol:
             raise ValueError("paper code, configuration, or model identity differs from approval")
-    cells = build_experiment_matrix(protocol)
+    request = config.release_request
+    digest = None
+    variant = str(config.metadata.get("exploration_variant", "wr"))
+    datasets = [DatasetName.MEMLENS, DatasetName.MEMGALLERY]
+    if request is not None:
+        from pmmc.release_plan import plan_hash
+
+        if phase != CampaignPhase.EXPLORATION or variant not in request["variants"]:
+            raise ValueError("release_request_campaign_mismatch")
+        if request["stage"] == "analysis" and not request["with_deps"]:
+            raise ValueError("source_analysis_cannot_plan_native_work_without_deps")
+        digest = plan_hash(request)
+        datasets = [DatasetName(name) for name in request["benchmarks"]]
+    cells = build_experiment_matrix(protocol, request, variant=variant)
     matrix_hash = canonical_content_hash([item.model_dump(mode="json") for item in cells])
     if campaign_dir is None:
         now = datetime.now(UTC)
@@ -163,7 +176,9 @@ def plan_campaign(
             phase=phase,
             protocol=protocol,
             partition_id=partition.partition_id,
-            snapshot_ids={item.dataset: item.snapshot_id for item in partition.datasets},
+            snapshot_ids={item.dataset: item.snapshot_id for item in partition.datasets
+                          if item.dataset in datasets},
+            release_plan_hash=digest,
             matrix_hash=matrix_hash,
             created_at=now,
             paper_result=phase is CampaignPhase.PAPER,
@@ -174,7 +189,7 @@ def plan_campaign(
         manifest = BenchmarkCampaignManifest.model_validate_json(
             (campaign_dir / "manifests/campaign.json").read_text()
         )
-        if manifest.protocol != protocol or manifest.phase is not phase:
+        if manifest.protocol != protocol or manifest.phase is not phase or manifest.release_plan_hash != digest:
             raise ValueError("scientific identity changed; create a new versioned campaign")
         if manifest.matrix_hash != matrix_hash:
             raise ValueError("experiment matrix changed")
@@ -211,6 +226,8 @@ def plan_campaign(
         exposure=exposure,
         regression_ids=regression_ids,
         seed=protocol.seed,
+        datasets=datasets,
+        release_plan_hash=digest,
         previous=previous,
         additional_exposed_ids=(
             recorded_exposure_query_ids(_resolve(project_root, config.output_root))
@@ -240,7 +257,8 @@ def plan_campaign(
         "manifests/matrix.json": [item.model_dump(mode="json") for item in cells],
         f"manifests/selections/{chosen.content_hash}.json": chosen.model_dump(mode="json"),
         "manifests/exposure.json": exposure.model_dump(mode="json"),
-        "reports/denominators.json": denominator_report(assignments, exposure),
+        "reports/denominators.json": {key: val for key, val in denominator_report(assignments, exposure).items()
+                                      if DatasetName(key) in datasets},
     }
     if freeze is not None:
         immutable["manifests/method-freeze.json"] = freeze.model_dump(mode="json")
@@ -319,6 +337,10 @@ def persist_campaign_job_plan(
             raise CampaignJobPlanError("campaign_job_payload_conflict")
     for path, payload in pending:
         durable_write(path, payload, immutable=True)
+    if selection.release_plan_hash is not None:
+        from pmmc.experiments.release_scope import freeze_selected_scopes
+
+        freeze_selected_scopes(directory, selection, jobs)
     if existing is None:
         durable_write(inventory, json_bytes(ids), immutable=True)
     return {
@@ -336,10 +358,28 @@ def build_campaign_jobs(
     selection: SelectionExpansionManifest,
     conversations: dict[DatasetName, dict[str, list[str]]],
     project_root: Path,
+    request: dict | None = None,
+    variant: str = "wr",
 ) -> list[BenchmarkStageJob]:
     """Conversation compilation is query-blind; online cells bind one selected query."""
     jobs: dict[str, BenchmarkStageJob] = {}
     proto = manifest.protocol
+    if request is not None or manifest.release_plan_hash:
+        from pmmc.release_plan import plan_hash
+
+        if (request is None or variant not in request["variants"]
+                or plan_hash(request) != manifest.release_plan_hash
+                or selection.release_plan_hash != manifest.release_plan_hash
+                or set(conversations) != set(selection.query_ids)
+                or set(selection.query_ids) != set(request["benchmarks"])
+                or manifest.phase != CampaignPhase.EXPLORATION):
+            raise ValueError("release_job_selection_mismatch")
+    standalone = request["methods"] if request and variant == "wr" and request["stage"] in {"all", "baselines"} else []
+    baseline_only = bool(request and request["stage"] == "baselines")
+    models = [m for m in proto.answer_backbones if request is None or m in request["models"]]
+    analysis = request is None or (variant == "wr" and request["stage"] in {"all", "analysis"}
+                                   and "ablation" in request["analyses"])
+    ablations = analysis and proto.answer_backbones[0] in models
 
     def add(
         stage: str,
@@ -367,6 +407,7 @@ def build_campaign_jobs(
             "native_fallback_ground": ("baseline_rag_config",),
             "primary_evaluate": ("evaluation_config",),
             "analysis_evaluate": ("evaluation_config",),
+            "baseline_evaluate": ("evaluation_config",),
             "query_match": ("foundation_config", "query_executor_config"),
             "query_answer": ("foundation_config", "query_executor_config"),
             "query_grounding": ("foundation_config", "query_executor_config"),
@@ -429,6 +470,19 @@ def build_campaign_jobs(
         jobs[job.job_id] = job
         return job
 
+    def exploration_readout(scope, deps, retrieval, resource, *, primary):
+        if primary:
+            scope = {**scope, "readout": "primary"}
+        match = add("matching", scope, deps, ResourceClass.GPU_9B, "query_match")
+        execute = add("execution", scope, [match], ResourceClass.CPU, "query_execute")
+        answer = add("answers", scope, [execute], resource, "query_answer")
+        fallback = add("answers", scope, [answer, retrieval], resource, "native_fallback_generate")
+        ground = add("grounding", scope, [fallback], ResourceClass.GPU_9B, "native_fallback_ground")
+        select = add("grounding", scope, [answer, ground], ResourceClass.GPU_9B, "query_grounding")
+        add("evaluation", scope, [select], ResourceClass.GPU_9B,
+            "primary_evaluate" if primary else "analysis_evaluate")
+        return match, select
+
     # JSON round-tripping sorts dictionary keys; insertion order is not identity.
     for dataset in sorted(conversations):
         by_conversation = conversations[dataset]
@@ -452,6 +506,8 @@ def build_campaign_jobs(
             ("contrastive_index", "contrastive_multimodal_rag"),
             ("multimodal_index", "native_multimodal_rag"),
         ):
+            if request and method not in standalone and (baseline_only or method != "native_multimodal_rag"):
+                continue
             indexes[method] = add(
                 stage,
                 {**base, "method": method},
@@ -465,14 +521,17 @@ def build_campaign_jobs(
             [corpus],
             ResourceClass.GPU_EMBEDDING,
             "baseline_index",
-        )
+        ) if ablations else None
         for conversation, query_ids in sorted(by_conversation.items()):
             projections: dict[Treatment, BenchmarkStageJob] = {}
             compiler_parents: dict[
                 Treatment, tuple[BenchmarkStageJob, BenchmarkStageJob, BenchmarkStageJob]
             ] = {}
             shared_questioner = None
-            for treatment in (Treatment.MAIN, Treatment.FIXED_PLANNER, Treatment.NO_RAW_IMAGE):
+            compiler_treatments = [] if baseline_only else [Treatment.MAIN]
+            if ablations and not baseline_only:
+                compiler_treatments += [Treatment.FIXED_PLANNER, Treatment.NO_RAW_IMAGE]
+            for treatment in compiler_treatments:
                 scope = {**base, "conversation_id": conversation, "treatment": treatment.value}
                 if treatment is Treatment.FIXED_PLANNER:
                     assert shared_questioner is not None
@@ -503,7 +562,7 @@ def build_campaign_jobs(
             for query_id in sorted(query_ids):
                 shared_main_match: BenchmarkStageJob | None = None
                 primary_producer: BenchmarkStageJob | None = None
-                for answer_model in proto.answer_backbones:
+                for answer_model in models:
                     query_scope = {
                         **base,
                         "conversation_id": conversation,
@@ -517,9 +576,24 @@ def build_campaign_jobs(
                         if answer_model == proto.answer_backbones[1]
                         else ResourceClass.API
                     )
+                    for method in standalone:
+                        arm = {**query_scope, "method": method, "treatment": "main", "standalone": True}
+                        # Full-context methods read the snapshot directly; no RAG index or corpus.
+                        suite_parent = corpus if method in indexes else snapshot
+                        child = add("unit_prepare", {**arm, "kind": "suite"}, [suite_parent],
+                                    ResourceClass.CPU, "suite")
+                        if method in indexes:
+                            child = add(indexes[method].stage, {**arm, "kind": "retrieval"},
+                                        [child, indexes[method]], ResourceClass.GPU_EMBEDDING,
+                                        "baseline_retrieve")
+                        child = add("answers", arm, [child], resource, "baseline_answer")
+                        child = add("grounding", arm, [child], ResourceClass.GPU_9B, "baseline_grounding")
+                        add("evaluation", arm, [child], ResourceClass.GPU_9B, "baseline_evaluate")
+                    if baseline_only:
+                        continue
                     suite = add(
                         "unit_prepare",
-                        {**query_scope, "kind": "suite"},
+                        {**query_scope, "kind": "suite", **({"fallback_only": True} if request else {})},
                         [corpus],
                         ResourceClass.CPU,
                         "suite",
@@ -530,6 +604,8 @@ def build_campaign_jobs(
                         ("contrastive_index", "contrastive_multimodal_rag"),
                         ("multimodal_index", "native_multimodal_rag"),
                     ):
+                        if request and method != "native_multimodal_rag":
+                            continue
                         retrievals.append(
                             add(
                                 stage,
@@ -539,22 +615,14 @@ def build_campaign_jobs(
                                 "baseline_retrieve",
                             )
                         )
-                    answers = add(
-                        "answers",
-                        {**query_scope, "kind": "baseline"},
-                        retrievals,
-                        resource,
-                        "baseline_answer",
-                    )
-                    grounded = add(
-                        "grounding",
-                        {**query_scope, "kind": "baseline"},
-                        [answers],
-                        ResourceClass.GPU_9B,
-                        "baseline_grounding",
-                    )
+                    grounded = None
+                    if request is None:
+                        arm = {**query_scope, "kind": "baseline"}
+                        answers = add("answers", arm, retrievals, resource, "baseline_answer")
+                        grounded = add("grounding", arm, [answers], ResourceClass.GPU_9B, "baseline_grounding")
                     caption_retrieval = caption_grounded = None
-                    if answer_model == proto.answer_backbones[0]:
+                    if ablations and answer_model == proto.answer_backbones[0]:
+                        assert caption_fallback_index is not None
                         caption_scope = {**query_scope, "treatment": "no_raw_image"}
                         caption_suite = add(
                             "unit_prepare",
@@ -574,22 +642,13 @@ def build_campaign_jobs(
                             ResourceClass.GPU_EMBEDDING,
                             "baseline_retrieve",
                         )
-                        caption_answers = add(
-                            "answers",
-                            {**caption_scope, "kind": "baseline"},
-                            [caption_retrieval],
-                            resource,
-                            "baseline_answer",
-                        )
-                        caption_grounded = add(
-                            "grounding",
-                            {**caption_scope, "kind": "baseline"},
-                            [caption_answers],
-                            ResourceClass.GPU_9B,
-                            "baseline_grounding",
-                        )
+                        if request is None:
+                            arm = {**caption_scope, "kind": "baseline"}
+                            caption_answers = add("answers", arm, [caption_retrieval], resource, "baseline_answer")
+                            caption_grounded = add("grounding", arm, [caption_answers], ResourceClass.GPU_9B,
+                                                  "baseline_grounding")
                     treatments = [Treatment.MAIN]
-                    if answer_model == proto.answer_backbones[0]:
+                    if ablations and answer_model == proto.answer_backbones[0]:
                         treatments += [
                             Treatment.FIXED_PLANNER,
                             Treatment.NO_RAW_IMAGE,
@@ -617,13 +676,33 @@ def build_campaign_jobs(
                         fallback_retrieval = retrievals[-1]
                         fallback_grounded = grounded
                         if treatment is Treatment.NO_RAW_IMAGE:
-                            assert caption_retrieval is not None and caption_grounded is not None
+                            assert caption_retrieval is not None
                             fallback_retrieval, fallback_grounded = (
                                 caption_retrieval,
                                 caption_grounded,
                             )
                         match_deps = [mm, projections[compiler_treatment], fallback_retrieval]
-                        if answer_model != proto.answer_backbones[0]:
+                        copy_match = answer_model != proto.answer_backbones[0] and proto.answer_backbones[0] in models
+                        if manifest.phase == CampaignPhase.EXPLORATION:
+                            if analysis:
+                                assert not copy_match or shared_main_match is not None
+                                matched, final = exploration_readout(scope, match_deps + (
+                                    [shared_main_match] if copy_match and shared_main_match else []
+                                ), fallback_retrieval, resource, primary=False)
+                                if answer_model == proto.answer_backbones[0] and treatment == Treatment.MAIN:
+                                    shared_main_match = matched
+                                if request is None:
+                                    assert fallback_grounded is not None
+                                    add("evaluation", scope, [final, fallback_grounded], ResourceClass.GPU_9B, "evaluate")
+                            if treatment == Treatment.MAIN:
+                                assert not copy_match or primary_producer is not None
+                                match, _ = exploration_readout(scope, match_deps + (
+                                    [primary_producer] if copy_match and primary_producer else []
+                                ), fallback_retrieval, resource, primary=True)
+                                if answer_model == proto.answer_backbones[0]:
+                                    primary_producer = match
+                            continue
+                        if copy_match:
                             assert shared_main_match is not None
                             match_deps.append(shared_main_match)
                         matched = add(
@@ -642,12 +721,7 @@ def build_campaign_jobs(
                             "execution", scope, [matched], ResourceClass.CPU, "query_execute"
                         )
                         answer = add("answers", scope, [executed], resource, "query_answer")
-                        paired_grounded = fallback_grounded
-                        if manifest.phase is CampaignPhase.EXPLORATION:
-                            native_answer = add("answers", scope, [answer, fallback_retrieval],
-                                                resource, "native_fallback_generate")
-                            fallback_grounded = add("grounding", scope, [native_answer],
-                                                    ResourceClass.GPU_9B, "native_fallback_ground")
+                        assert fallback_grounded is not None
                         final = add(
                             "grounding",
                             scope,
@@ -655,35 +729,9 @@ def build_campaign_jobs(
                             ResourceClass.GPU_9B,
                             "query_grounding",
                         )
-                        if manifest.phase is CampaignPhase.EXPLORATION:
-                            add("evaluation", scope, [final], ResourceClass.GPU_9B,
-                                "analysis_evaluate")
-                            add("evaluation", scope, [final, paired_grounded], ResourceClass.GPU_9B,
-                                "evaluate")
-                        else:
-                            add("evaluation", scope, [final], ResourceClass.GPU_9B, "evaluate")
-                        if (manifest.phase is CampaignPhase.EXPLORATION
-                                and treatment is Treatment.MAIN):
-                            # A narrower, independently identified run does not depend on
-                            # baseline answer jobs or claim to score absent ablation cells.
-                            primary = {**scope, "readout": "primary"}
-                            deps = [mm, projections[treatment], fallback_retrieval]
-                            if answer_model != proto.answer_backbones[0]:
-                                assert primary_producer is not None
-                                deps.append(primary_producer)
-                            match = add("matching", primary, deps, ResourceClass.GPU_9B,
-                                        "query_match")
-                            if answer_model == proto.answer_backbones[0]:
-                                primary_producer = match
-                            execute = add("execution", primary, [match], ResourceClass.CPU,
-                                          "query_execute")
-                            generate = add("answers", primary, [execute], resource, "query_answer")
-                            fallback = add("answers", primary, [generate, fallback_retrieval],
-                                           resource, "native_fallback_generate")
-                            ground = add("grounding", primary, [fallback], ResourceClass.GPU_9B,
-                                         "native_fallback_ground")
-                            select = add("grounding", primary, [generate, ground],
-                                         ResourceClass.GPU_9B, "query_grounding")
-                            add("evaluation", primary, [select], ResourceClass.GPU_9B,
-                                "primary_evaluate")
+                        add("evaluation", scope, [final], ResourceClass.GPU_9B, "evaluate")
+    if request is not None:
+        from pmmc.experiments.release_scope import selected_campaign_jobs
+
+        return selected_campaign_jobs(jobs, request, variant)
     return list(jobs.values())

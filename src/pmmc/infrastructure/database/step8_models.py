@@ -189,8 +189,19 @@ class BenchmarkBudgetApprovalModel(Base):
     __tablename__ = "benchmark_budget_approvals"
     __table_args__ = (
         UniqueConstraint("campaign_id", "selection_hash"),
+        UniqueConstraint("plan_hash"),
         CheckConstraint("limit_usd > 0", name="positive_limit"),
+        CheckConstraint(
+            "(plan_hash IS NULL AND plan_bindings IS NULL AND limit_usd IS NOT NULL)"
+            " OR (plan_hash IS NOT NULL AND plan_bindings IS NOT NULL)",
+            name="budget_authority",
+        ),
         CheckConstraint("settled_usd >= 0 AND reserved_usd >= 0", name="spend_nonnegative"),
+        CheckConstraint(
+            "(stopped_at IS NULL AND stopped_by IS NULL AND stop_reason IS NULL)"
+            " OR (plan_hash IS NOT NULL AND stopped_at IS NOT NULL"
+            " AND stopped_by IS NOT NULL AND stop_reason IS NOT NULL)", name="stop_audit"
+        ),
         {"schema": RUNTIME_SCHEMA},
     )
     approval_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -204,7 +215,12 @@ class BenchmarkBudgetApprovalModel(Base):
     )
     approver_id: Mapped[str] = mapped_column(String(256), nullable=False)
     rate_card_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    limit_usd: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    plan_hash: Mapped[str | None] = mapped_column(String(64))
+    plan_bindings: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stopped_by: Mapped[str | None] = mapped_column(String(256))
+    stop_reason: Mapped[str | None] = mapped_column(String(128))
+    limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     settled_usd: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal(0))
     reserved_usd: Mapped[Decimal] = mapped_column(
         Numeric(20, 8), nullable=False, default=Decimal(0)

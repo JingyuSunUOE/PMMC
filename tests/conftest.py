@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -13,6 +14,55 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@pytest.fixture(scope="session")
+def host_release_source(tmp_path_factory):
+    """Isolated installation for host/CLI tests; never add a fixture lock to the checkout."""
+    from scripts import release_images
+
+    root = tmp_path_factory.mktemp("public-host")
+    names = {
+        "scripts/pmmc",
+        "scripts/release_source.py",
+        "scripts/release_images.py",
+        "src/pmmc/__init__.py",
+        "src/pmmc/release_plan.py",
+        "deploy/release/kubernetes.toml",
+        "deploy/release/upstream.json",
+        "SOURCE.sha256",
+    }
+    names.update(
+        n.removeprefix("!")
+        for n in (ROOT / ".dockerignore").read_text().splitlines()
+        if n.startswith("!scripts/release_host/") and n.endswith(".py")
+    )
+    for n in names:
+        (root / n).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / n, root / n)
+    lock = {
+        "schema_version": 1,
+        "source_commit": "1" * 40,
+        "source_manifest_sha256": release_images.sha((root / "SOURCE.sha256").read_bytes()),
+        "images": {
+            **json.loads((root / release_images.UPSTREAM).read_bytes()),
+            "app": "ghcr.io/fixture/app@sha256:" + "a" * 64,
+            "iam": "ghcr.io/fixture/iam@sha256:" + "b" * 64,
+        },
+    }
+    data = json.dumps(lock).encode()
+    (root / release_images.LOCK).write_bytes(data)
+    return root, release_images.sha(data)
+
+
+@pytest.fixture
+def installed_host_lock(host_release_source, monkeypatch, request):
+    from scripts.release_host import config
+
+    root, checksum = host_release_source
+    monkeypatch.setenv("PMMC_IMAGE_LOCK_SHA256", checksum)
+    monkeypatch.setattr(config, "ROOT", root)
+    monkeypatch.setattr(request.module, "ROOT", root)
 
 
 def _write_image(path: Path, color: tuple[int, int, int]) -> None:

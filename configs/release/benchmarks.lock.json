@@ -1,0 +1,137 @@
+{
+  "protocol": "pmmc-public-data-lock-v1",
+  "datasets": {
+    "memgallery": {
+      "hf_dataset": "Ethan-Bei/Mem-Gallery",
+      "hf_revision": "af912daba984e896e253016b7c7e334ef92c2a6f",
+      "github_repo": "YuanchenBei/Mem-Gallery",
+      "github_revision": "a93959e1e978a6a7d77798ae92c2ffe41c538c62",
+      "dataset_terms": "MIT",
+      "terms_url": "https://huggingface.co/datasets/Ethan-Bei/Mem-Gallery/resolve/af912daba984e896e253016b7c7e334ef92c2a6f/README.md",
+      "code_terms_url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/LICENSE",
+      "file_count": 1515,
+      "materialized_sha256": "9f5d4e5a2256265f87606e1aad60f49d0944f76149fc5c6a941153d9cc98c50e",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/benchmark/memengine/evaluate/llm_judge.txt",
+          "target": "prompts/source/llm_judge.txt",
+          "size": 2383,
+          "sha256": "44969a08335d0127d8a636c63aa925b1ca58fba67db424332c80b6078966a9cd"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/benchmark/prompt/ar_prompt.txt",
+          "target": "prompts/source/ar_prompt.txt",
+          "size": 177,
+          "sha256": "da6381ac3fdccb029389e96f28dd7c37c416a2fdccc80645470311216d66d6da"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/benchmark/prompt/cd_prompt.txt",
+          "target": "prompts/source/cd_prompt.txt",
+          "size": 125,
+          "sha256": "fa5b1f1961f7a0bd3575371f5d1100197644bd62307d9fc927458a7368c6eab3"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/benchmark/prompt/sys_prompt.txt",
+          "target": "prompts/source/sys_prompt.txt",
+          "size": 1532,
+          "sha256": "6bf776a0d3b26c0ea49f4e72c55d7e951a9b340f3f32944b507175861d483759"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/YuanchenBei/Mem-Gallery/a93959e1e978a6a7d77798ae92c2ffe41c538c62/benchmark/prompt/vs_prompt.txt",
+          "target": "prompts/source/vs_prompt.txt",
+          "size": 211,
+          "sha256": "340f461de7fba952c39a9fc4f82b36edb60bc17ec7cd076307f868941bb70f52"
+        }
+      ],
+      "regular_blob_sha256": {
+        "data/dialog/AI_Robotics_Automation_Future_Tech.json": "fb51fad8a80b3610d90eaced0bf01bb2250a7f486a8dc67e8e9eee88a4e55b8e",
+        "data/dialog/Academic_Animal_Pet_Research_Life.json": "9289425b20c81b25a217ad1a76009c88ddf02a784881b719f8b7e5b25911b948",
+        "data/dialog/Architecture_Art_Culture_Exhibition_Technology.json": "1d1c336cb1412ef866d3d6b7efddeb5dadc1f6ef1fd2678b79239722ae285bd4",
+        "data/dialog/Astronomy_Physics_Scientific_Experiments_Cosmology.json": "38e1820504b88845f001c2820fdb53e0db8d0a4b9dc59083e5e60f376b864b97",
+        "data/dialog/Baking_Dessert_Daily_Life_Skill.json": "7b0169375ef20cfa9ddf67433ca78139f82ce30449e7813bb748ea29610ea859",
+        "data/dialog/Dog_Behavior_Research_Academic_Life.json": "d825f7e3798514144230bb9edc9c8811604c92f8ad16584ad24d1fc18029898b",
+        "data/dialog/Education_Career_Research_Lifestyle.json": "6e8c712397dc41ae0da623250c36250f5b71a85a4f86199159d729337136cc8b",
+        "data/dialog/Entrepreneurship_Blockchain_Economics_Logistics_Nature.json": "c869195883d786b12c1ec984ca12a2b061c0aea2b5feb7f1d19cc0070392bf5b",
+        "data/dialog/Fashion_Personal_Care_Lifestyle_Shopping.json": "7c4d3a48758429280a9e0b55fce2ae1af1f1d7e05b27800240f15e2a45a2751a",
+        "data/dialog/Global_Travel_Cultural_Sightseeing.json": "775871b984df79969ac9e50d0497642d49eaa203ab09937127d6358dc7a17037",
+        "data/dialog/Global_Travel_Sustainable_Fashion_Design.json": "e8c5e8c36d559a25172204af98a1a012db580115061f5b1609e9d4b7b850b5d8",
+        "data/dialog/Home_Health_Lifestyle_Product.json": "bcc786c056738d5163ad0a132ba67caae2df82303ac7b99065471721484caf1b",
+        "data/dialog/Home_Repair_Maintenance_Cleaning.json": "6c10293e51b5a9fa567eb8fd56bd9af52429b19a9aa945abd26f5cea6ed9f91c",
+        "data/dialog/Landscape_Travel_Architecture_Nature.json": "883d8fc1ea325fa7abf3bad5213e2f192323c71dc4209b6b24dfd0edcc66615a",
+        "data/dialog/Music_Dance_Theater_Performance_Learning.json": "c536c4091c463a7cb0a71db9628f1fbf744389b049b74945b505b6f73f91569f",
+        "data/dialog/Nature_Economics_Programming_Student_Life.json": "3978b59ff7beeb1d64c50c8393127b70504130139cd90c198c2bb9e1533dc6b0",
+        "data/dialog/Parenting_Commuting_Hobbies_Travel_Gear.json": "88824a01e9a25ef49a7af63436651ec323910a81f3139be3796d398d101a892e",
+        "data/dialog/Python_Botany_AI_Student_Life.json": "d5bd84226e1dd48ade2d37683f91ed3a55d7f230d89bb6414ef68782b5103a7b",
+        "data/dialog/Real_Estate_Home_Decor_DIY_Lifestyle.json": "ace411b22e74f80f9e25e5bf12279133b9895e2f38c9347581ae45541b740fcd",
+        "data/dialog/Technology_Ethics_Future_Society.json": "11d931289ddd6bd9bd59a5564ccf6494d4ef59a10cdc5f320fbcf4a863c27fa2"
+      }
+    },
+    "memlens": {
+      "hf_dataset": "xiyuRenBill/MEMLENS",
+      "hf_revision": "afa101a1907cc37db40b50d649547964387b96b7",
+      "github_repo": "xrenaf/MEMLENS",
+      "github_revision": "77f3ab9a52fa2d6a17978e2dffe80438a4ecced2",
+      "dataset_terms": "CC-BY-4.0; underlying image terms apply",
+      "terms_url": "https://huggingface.co/datasets/xiyuRenBill/MEMLENS/resolve/afa101a1907cc37db40b50d649547964387b96b7/LICENSE-DATA",
+      "code_terms_url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/LICENSE-CODE",
+      "file_count": 4703,
+      "materialized_sha256": "3c9f8489f1f3238f1e45c66b73156d20adb2240b5305a8a5c204455376abf59a",
+      "files": [
+        {
+          "url": "https://huggingface.co/datasets/xiyuRenBill/MEMLENS/resolve/afa101a1907cc37db40b50d649547964387b96b7/dataset_32k.json",
+          "target": "data/dataset_32k.json",
+          "size": 98085636,
+          "sha256": "4c75acc3e0a7e1cc71bc962bff3d2a0f1f35e268bc28254ca85f1d9867b03eb9"
+        },
+        {
+          "url": "https://huggingface.co/datasets/xiyuRenBill/MEMLENS/resolve/afa101a1907cc37db40b50d649547964387b96b7/release_images.tar.gz",
+          "target": "archive",
+          "size": 225061390,
+          "sha256": "8d0be814ab3ffe99ed3ea84ed04eacd9f06423c4068da2c24e4749c7ca3940f6"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/__init__.py",
+          "target": "prompts/judge/__init__.py",
+          "size": 3385,
+          "sha256": "6fb0ab74c0c545b1587572b1067b7c08014e4d7c97c972f0c96edd7b5615cb53"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/answer_refusal.py",
+          "target": "prompts/judge/answer_refusal.py",
+          "size": 1479,
+          "sha256": "e07fc9484e6fb35a3b3b8cba8b07b16e36f2ed512910f2feaf968da59c78f664"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/base.py",
+          "target": "prompts/judge/base.py",
+          "size": 6208,
+          "sha256": "819cda1091caa8ce48e9cb60733369a2bc463dfd91c168ef2537a63ae38fd55e"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/information_extraction.py",
+          "target": "prompts/judge/information_extraction.py",
+          "size": 3138,
+          "sha256": "2c8b655ab367efd29c03457cb658bcdd7fcb06a334e6d645ed912e02d158b554"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/knowledge_update.py",
+          "target": "prompts/judge/knowledge_update.py",
+          "size": 1661,
+          "sha256": "449f5da78fead7103924cced8c0cdd6506384562a82d6ffea5a73f46f17bf84d"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/multi_session_reasoning.py",
+          "target": "prompts/judge/multi_session_reasoning.py",
+          "size": 3387,
+          "sha256": "942e4002de496158ba805e5cd89c790e1c4cfe41d65a17ec73144e53af19a12d"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/xrenaf/MEMLENS/77f3ab9a52fa2d6a17978e2dffe80438a4ecced2/judge_prompts/temporal_reasoning.py",
+          "target": "prompts/judge/temporal_reasoning.py",
+          "size": 3944,
+          "sha256": "a826c260ee093cda2c9de3501d3c5ddda7ab17e413dcbaef8a741847b3b6f9f5"
+        }
+      ]
+    }
+  }
+}

@@ -1050,9 +1050,9 @@ async def load_process_facts(sessions, *, query: QueryInput, query_run_id: str) 
 
 async def evaluate_process_metrics(sessions, **kwargs) -> ProcessMetricsReport:
     try:
-        facts = await load_process_facts(
+        facts = (await load_process_facts(
             sessions, query=kwargs["query"], query_run_id=kwargs["query_run_id"]
-        )
+        ) if any(c.method == "pmmc" for c in kwargs["cells"]) else ProcessFacts())
     except SQLAlchemyError:
         facts = ProcessFacts(load_error="process_database_unavailable")
     except (ValueError, KeyError, TypeError):

@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# Release bootstrap provisions and verifies all three least-privilege logins
+# after PostgreSQL is ready. Do not require duplicate passwords at initdb time.
+if [ "${PMMC_RELEASE_BOOTSTRAP_ROLES:-}" = 1 ]; then
+    exit 0
+fi
+
 psql --set ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \

@@ -1,0 +1,82 @@
+# Copy to a private operator location. Install the attested external lock at
+# deploy/release/images.lock.json and set PMMC_IMAGE_LOCK_SHA256 to its reviewed checksum.
+profile = "kubernetes"
+instance = "pmmc-release"
+
+[images]
+# Empty uses the four references from deploy/release/images.lock.json.
+# Optional mirror entries must preserve the corresponding verified digest.
+
+[cluster]
+context = "REPLACE_WITH_KUBECTL_CONTEXT"
+namespace = "REPLACE_WITH_NAMESPACE"
+# image_pull_secrets = ["registry-read"]
+# Match your cluster's labels/taints on every service and Job. Examples only:
+# node_selector = { "example.org/node-pool" = "accelerated" }
+# tolerations = [{ key = "nvidia.com/gpu", operator = "Exists", effect = "NoSchedule" }]
+shared_pvc = "REPLACE_WITH_BOUND_RWX_CLAIM"
+storage_class = "REPLACE_WITH_APPROVED_RWO_CLASS"
+shared_access_mode = "ReadWriteMany"
+# Default: operator pre-provisions the shared claim and its subdirectories.
+# To create a new dedicated shared claim (never adopt an existing unowned one):
+# create_shared_pvc = true
+# shared_storage_class = "rwx-class"
+# shared_storage_gib = 512
+# Managed layout uses a one-time, digest-pinned CHOWN-only root initializer
+# on THIS claim, then verifies as identity.uid/gid. It sets the owner only
+# on newly created leaves; no recursive chown, no credential mounts, no token.
+# If admission forbids that initializer, pre-provision a claim instead.
+# Live discovery needs read-only Node and all-namespace Pod inventory in
+# addition to namespace ResourceQuotas. To opt out with an explicitly verified
+# [capacity] envelope, set discovery = "declared"; quota still gates every Job.
+discovery = "live"
+# For single-node shared RWO, set shared_access_mode = "ReadWriteOnce" and
+# pin all workloads (including readers and calibration) to the same hostname.
+# node_hostname = "worker-01"
+# Optional: only set queue if Kueue manages both Jobs and StatefulSets here.
+# queue = "local-queue"
+postgres_storage_gib = 32
+minio_storage_gib = 64
+admission_timeout_seconds = 600
+
+# Optional operator ceilings on ONE eligible node and its namespace budget.
+# Required (all three) for discovery = "declared"; otherwise live discovery
+# resolves auto against actual node and namespace headroom before launch.
+# [capacity]
+# gpus = 2
+# cpus = 16
+# memory_gib = 96
+
+[resources]
+gpus = "auto"
+cpus = "auto"
+memory_gib = "auto"
+# Explicit TP must divide the requested GPU count; a fresh capacity gate applies.
+answer_tp = "auto"
+
+# Disjoint subdirectories of shared_pvc, not node-local paths. For a
+# pre-provisioned claim, create the directories before launch, traverse-enable
+# their parents, and grant identity.uid/gid write access. Only assets writes
+# inputs (as /pmmc-stage); all ordinary workers mount inputs read-only.
+[mounts]
+inputs = "release/inputs"
+outputs = "release/outputs"
+artifacts = "release/artifacts"
+cache = "release/hf"
+
+[native]
+benchmark_config = "/workspace/configs/release/prepare-models.yaml"
+# rate_card = "/pmmc-inputs/rate-card.yaml"
+
+# Optional private pricing files in <instance>-rates. The two keys are
+# rate-card.yaml and provider-policy.json; only quote/approve/control mount them.
+# The preferred mode is a UI suggestion, NEVER a budget approval.
+[billing]
+policy_secret = false
+preferred_mode = "finite"
+
+[models]
+allow_download = true
+create_lock = false
+use_hf_token = false
+calibrate = true

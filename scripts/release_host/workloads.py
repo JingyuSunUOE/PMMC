@@ -3,7 +3,8 @@
 import secrets
 from pathlib import Path
 
-from .quota import DEFAULTS
+from .config import check
+from .quota import DEFAULTS, GPU_ROLES
 
 WORKER = (
     "PMMC_DATABASE_URL",
@@ -19,7 +20,6 @@ ROOT_KEYS = ("PMMC_MINIO_ROOT_USER", "PMMC_MINIO_ROOT_PASSWORD")
 IAM_KEYS = (*ROOT_KEYS, *WORKER[3:])
 PROVIDER = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 BENCH = ["python", "-m", "pmmc", "benchmark"]
-GPU_ROLES = ("gpu",)
 # Execute in the verified app image (no host package installation or credentials).
 # A saved budget changes native job selection even if the host passes no keys.
 VERIFY_POINTER = """import hashlib, json, os, sys
@@ -68,18 +68,27 @@ def credentials(name):
     return values
 
 
-def secret_refs(role, cfg, approval):
+def secret_refs(role, cfg, approval, plan=None):
     if role == "postgres":
         return {"POSTGRES_PASSWORD": "PMMC_POSTGRES_ADMIN_PASSWORD"}
     if role == "minio":
         return dict(zip(("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"), ROOT_KEYS, strict=True))
-    keys = list(WORKER) if role in ("bootstrap", "control", *GPU_ROLES) else []
+    keys = list(WORKER) if role in ("bootstrap", "control", *GPU_ROLES, "prepare-capacity") else []
     if role in ("quote", "approve"):
         keys.append(WORKER[0])
     if role in ("bootstrap", "control"):
         keys.append(ADMIN)
     if role == "control" and approval:
-        keys.extend(PROVIDER)
+        check(
+            isinstance(plan, dict) and isinstance(plan.get("models"), list) and plan["models"],
+            "approved control requires an explicit model selection",
+        )
+        for model, key in (
+            ("answer-gpt-6-luna", PROVIDER[0]),
+            ("answer-claude-haiku-5.5", PROVIDER[1]),
+        ):
+            if model in plan["models"]:
+                keys.append(key)
     if role == "models" and cfg["models"]["use_hf_token"]:
         keys.append("HF_TOKEN")
     refs = {k: k for k in keys}
@@ -142,17 +151,22 @@ def environment(role, cfg, name, approval):
         if "rate_card" in native:
             base["PMMC_STEP8_RATE_CARD_PATH"] = native["rate_card"]
     if role in GPU_ROLES:
-        threads = str(max(1, min(8, (cfg["resources"]["gpu"]["cpu"] - 2) // 8)))
+        count = cfg["topology"]["gpus"]
+        if not count:
+            from .config import Error
+
+            raise Error("GPU phase requires a positive single-node GPU allocation")
+        threads = str(max(1, (cfg["resources"][role]["cpu"] - 2) // count))
         base.update(
             {
                 "PMMC_RUNTIME_MODE": "managed_local",
-                "PMMC_EXPECTED_GPU_COUNT": "8",
+                "PMMC_EXPECTED_GPU_COUNT": str(count),
                 "PMMC_GPU_MEMORY_ACCOUNTING": "allocated_device",
                 "PMMC_MODEL_CPU_THREADS_PER_REPLICA": threads,
                 "OMP_NUM_THREADS": threads,
                 "MKL_NUM_THREADS": threads,
                 "OPENBLAS_NUM_THREADS": threads,
-                "PMMC_MODEL_FOLLOWER_START_BATCH_SIZE": "4",
+                "PMMC_MODEL_FOLLOWER_START_BATCH_SIZE": str(min(4, count)),
                 "PMMC_LOCAL_SCRATCH_DIR": "/pmmc-scratch",
                 "PMMC_STAGE_MODEL_SNAPSHOTS_TO_LOCAL": "1",
                 "PMMC_TOKEN_COUNTER_CACHE_DIR": "/pmmc-scratch/token-counter",
@@ -169,6 +183,14 @@ def command(role, cfg, run, stage, request=None):
     select = ["--run-id", run, "--variant", variant]
     if role == "iam":
         return ["python", "/opt/pmmc-step8/step8_iam.py"]
+    if role == "assets":
+        return ["python", "-m", "pmmc.experiments.release_assets"]
+    if role == "analysis-report":
+        return ["python", "-m", "pmmc.experiments.release_readouts"]
+    if role == "prepare-capacity":
+        return cold(
+            "gpu", ["python", "-c", 'print(\'{"protocol":"release-capacity-v2","ready":true}\')']
+        )
     if role == "bootstrap":
         return [*BENCH, "bootstrap"]
     if role == "models":
@@ -183,6 +205,8 @@ def command(role, cfg, run, stage, request=None):
             ],
         )
     if role == "prepare":
+        if request.get("kind") in {"quote", "approve", "prepare"} and request.get("plan"):
+            return ["python", "-m", "pmmc.experiments.release_prepare_variants", run, variant]
         return [*BENCH, "prepare-exploration", *select]
     if role == "quote":
         return [
@@ -207,8 +231,7 @@ def command(role, cfg, run, stage, request=None):
             request["rate_card"],
             "--approver-id",
             request["approver_id"],
-            "--limit-usd",
-            request["limit_usd"],
+            *(["--uncapped"] if request.get("uncapped") else ["--limit-usd", request["limit_usd"]]),
         ]
     if role == "pointer":
         return ["python", "-c", VERIFY_POINTER, run, variant]
@@ -221,4 +244,8 @@ def command(role, cfg, run, stage, request=None):
         "--worker-pool",
         "gpu" if role == "gpu" else "control",
     ]
-    return cold(role, argv) if role == "gpu" and cfg["models"]["calibrate"] else argv
+    return (
+        cold(role, argv)
+        if role == "gpu" and (request.get("plan") or cfg["models"]["calibrate"])
+        else argv
+    )

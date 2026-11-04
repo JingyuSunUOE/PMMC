@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pmmc.experiments.release_models import selected_release_model_aliases
 from pmmc.experiments.step8_artifacts import durable_write, json_bytes, sha256_file
 from pmmc.infrastructure.settings import Settings
 from pmmc.models.locking import (
@@ -70,10 +71,13 @@ def _check_verification(
     *,
     cached: bool,
     previous: ModelCachePreparation | None = None,
+    aliases: list[str] | None = None,
 ) -> None:
-    entries = {entry.alias: entry for entry in lock.entries}
+    entries = {
+        entry.alias: entry for entry in lock.entries if aliases is None or entry.alias in aliases
+    }
     if (
-        not entries
+        (not entries if aliases is None else set(aliases) != set(entries))
         or set(preparation.paths) != set(entries)
         or set(preparation.verifications) != set(entries)
     ):
@@ -179,13 +183,17 @@ def prepare_step8_models(
                 report["lock_state"] = "created"
             lock, lock_hash = _read_lock(lock_path)
             _validate_lock(lock, registry, aliases)
-            open_aliases = sorted(entry.alias for entry in lock.entries)
+            open_aliases = (
+                selected_release_model_aliases(settings, config)
+                if "PMMC_RELEASE_REQUEST" in os.environ
+                else sorted(e.alias for e in lock.entries)
+            )
             report.update(
                 lock_sha256=lock_hash,
                 local_model_aliases=open_aliases,
-                native_provider_aliases=sorted(set(aliases) - set(open_aliases)),
+                native_provider_aliases=sorted(set(aliases) - {e.alias for e in lock.entries}),
                 physical_snapshot_count=len(
-                    {(entry.repo_id, entry.commit_sha) for entry in lock.entries}
+                    {(e.repo_id, e.commit_sha) for e in lock.entries if e.alias in open_aliases}
                 ),
                 campaign_inputs={
                     "validation": "not_performed",
@@ -207,12 +215,12 @@ def prepare_step8_models(
                 lock,
                 cache_dir,
                 token=token,
-                aliases=aliases,
+                aliases=open_aliases,
                 local_files_only=not allow_download,
                 verification_policy=ModelVerificationPolicy.FULL,
                 allow_full_fallback=True,
             )
-            _check_verification(full, lock, cached=False)
+            _check_verification(full, lock, cached=False, aliases=open_aliases)
             report["full_verification"] = {
                 "policy": "full",
                 "bytes_hashed": sum(result.bytes_hashed for result in full.verifications.values()),
@@ -223,12 +231,12 @@ def prepare_step8_models(
                 lock,
                 cache_dir,
                 token=None,
-                aliases=aliases,
+                aliases=open_aliases,
                 local_files_only=True,
                 verification_policy=ModelVerificationPolicy.CACHED_RECEIPT,
                 allow_full_fallback=False,
             )
-            _check_verification(cached, lock, cached=True, previous=full)
+            _check_verification(cached, lock, cached=True, previous=full, aliases=open_aliases)
             if lock_path.is_symlink() or sha256_file(lock_path) != lock_hash:
                 raise _PreparationFailure("model_lock_changed_during_preparation")
             if sha256_file(registry_path) != registry_hash:

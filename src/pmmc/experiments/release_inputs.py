@@ -23,6 +23,7 @@ from typing import Any
 
 from pmmc.benchmarks.canonical import preflight_snapshot
 from pmmc.benchmarks.registry import create_adapter
+from pmmc.benchmarks.release_data import LOCK as SOURCE_LOCK
 from pmmc.benchmarks.snapshot import CANONICAL_FILES, build_snapshot
 from pmmc.benchmarks.validation import scan_adapter
 from pmmc.compiler.ids import canonical_content_hash
@@ -37,6 +38,7 @@ from pmmc.experiments.step8_selection import ExposureManifest, denominator_repor
 from pmmc.infrastructure.settings import Settings
 from pmmc.pilots import partition as native_partition
 from pmmc.pilots.partition import load_partition, verify_partition
+from pmmc.release_plan import plan_from_environment, plan_hash
 from pmmc.runtime.config import load_runtime_profile
 from pmmc.runtime.query_executor_config import load_query_executor_config
 from pmmc.runtime.step8_capacity import capacity_image_workload
@@ -203,7 +205,12 @@ def _known_exposure(settings: Settings, partition_dir: Path) -> ExposureManifest
     exposure = ExposureManifest(
         complete=False,
         partition_hash=manifest.content_hash,
-        query_ids={d: sorted(ids[d]) for d in _DATASETS},
+        # The ledger always has two keys. A single-benchmark partition must
+        # retain every known ID in that benchmark, not import another cohort.
+        query_ids={
+            d: sorted(ids[d]) if d in {item.dataset for item in manifest.datasets} else []
+            for d in _DATASETS
+        },
         provenance_hashes=sorted(proofs),
     )
     denominator_report(assignments, exposure)  # Don't silently discard unmappable known IDs.
@@ -225,7 +232,7 @@ def _build_original_partition(paths: list[Path], staging: Path) -> Path:
     return directory
 
 
-def _original_membership(root: Path, partition: Path) -> dict:
+def _original_membership(root: Path, partition: Path, datasets=_DATASETS) -> dict:
     """Certify FULL identities and original query-to-fold membership, not just counts."""
     reference = json.loads(_local(root / _SPLIT, root).read_bytes())
     manifest, rows = load_partition(partition)
@@ -233,7 +240,7 @@ def _original_membership(root: Path, partition: Path) -> dict:
         reference["dataset_split_version"] != _SPLIT_VERSION
         or manifest.spec != _V2
         or set(reference["datasets"]) != {d.value for d in _DATASETS}
-        or {d.dataset for d in manifest.datasets} != set(_DATASETS)
+        or {d.dataset for d in manifest.datasets} != set(datasets)
     ):
         raise ValueError("exploration_original_split_required")
     digests = {}
@@ -266,7 +273,21 @@ def _original_membership(root: Path, partition: Path) -> dict:
     }
 
 
-def _bootstrap_inputs(settings: Settings, run: Path) -> dict:
+def _selected_datasets(request: dict | None) -> tuple[DatasetName, ...]:
+    return tuple(DatasetName(d) for d in request["benchmarks"]) if request else _DATASETS
+
+
+def _source_locks(root: Path, datasets: tuple[DatasetName, ...]) -> dict[str, str]:
+    lock = json.loads(_local(root / SOURCE_LOCK, root).read_bytes())
+    return {
+        d.value: canonical_content_hash([lock["protocol"], lock["datasets"][d.value]])
+        for d in datasets
+    }
+
+
+def _bootstrap_inputs(settings: Settings, run: Path, request: dict | None = None) -> dict:
+    datasets = _selected_datasets(request)
+    locks = _source_locks(settings.project_root.resolve(), datasets) if request else None
     directory = run / "inputs"
     retained = directory.exists()
     if not retained:
@@ -277,11 +298,12 @@ def _bootstrap_inputs(settings: Settings, run: Path) -> dict:
             # The snapshot publisher uses a shared content-addressed destination.
             # Serialize cold creation even across independent run IDs.
             with _lock(run.parent / ".snapshots.lock"):
-                for dataset, source in zip(
-                    _DATASETS,
-                    (settings.memlens_path, settings.memgallery_path),
-                    strict=True,
-                ):
+                for dataset in datasets:
+                    source = (
+                        settings.memlens_path
+                        if dataset is DatasetName.MEMLENS
+                        else settings.memgallery_path
+                    )
                     adapter = create_adapter(
                         dataset, root=source, project_root=settings.benchmark_asset_path
                     )
@@ -309,12 +331,17 @@ def _bootstrap_inputs(settings: Settings, run: Path) -> dict:
                     }
             partition = _build_original_partition(paths, staging)
             manifest = verify_partition(partition)
-            membership = _original_membership(settings.project_root.resolve(), partition)
+            membership = _original_membership(settings.project_root.resolve(), partition, datasets)
             exposure = _known_exposure(settings, partition)
             write_json(staging / "exposure.json", exposure.model_dump(mode="json"), immutable=True)
             write_json(
                 staging / "inputs.json",
                 {
+                    **(
+                        {"release_request": request, "benchmark_source_locks": locks}
+                        if request is not None
+                        else {}
+                    ),
                     "partition_id": manifest.partition_id,
                     "partition_hash": manifest.content_hash,
                     "exposure_hash": exposure.content_hash,
@@ -327,6 +354,8 @@ def _bootstrap_inputs(settings: Settings, run: Path) -> dict:
             staging.rename(directory)
 
     receipt = json.loads(_local(directory / "inputs.json", run).read_bytes())
+    if request != receipt.get("release_request"):
+        raise ValueError("exploration_release_request_changed_use_new_run_id")
     partition = _local(directory / receipt["partition_id"], directory)
     manifest = verify_partition(partition)
     exposure = ExposureManifest.model_validate_json(
@@ -334,12 +363,13 @@ def _bootstrap_inputs(settings: Settings, run: Path) -> dict:
     )
     if (
         manifest.content_hash != receipt["partition_hash"]
-        or _original_membership(settings.project_root.resolve(), partition)
+        or locks != receipt.get("benchmark_source_locks")
+        or _original_membership(settings.project_root.resolve(), partition, datasets)
         != receipt.get("split_membership")
         or exposure.complete
         or exposure.partition_hash != manifest.content_hash
         or exposure.content_hash != receipt["exposure_hash"]
-        or set(receipt["snapshots"]) != {d.value for d in _DATASETS}
+        or set(receipt["snapshots"]) != {d.value for d in datasets}
     ):
         raise ValueError("exploration_frozen_inputs_changed")
     for entry in manifest.datasets:
@@ -375,6 +405,11 @@ def _config(settings: Settings, run: Path, variant: str, inputs: dict) -> Step8B
         "exposure_manifest": directory / "exposure.json",
         "output_root": (settings.outputs_path / "step8").relative_to(root),
         "metadata": {
+            **(
+                {"release_request": inputs["release_request"]}
+                if "release_request" in inputs
+                else {}
+            ),
             "exploration_run_id": run.name,
             "exploration_variant": variant,
             "source_identity": inputs["source_identity"],
@@ -388,6 +423,17 @@ def _config(settings: Settings, run: Path, variant: str, inputs: dict) -> Step8B
         updates["questioner_config"] = _WRITER
     if variant in {"r", "wr"}:
         updates["query_executor_config"] = _READER
+    from pmmc.runtime.release_topology import materialize
+
+    if derived := materialize(settings):
+        from pmmc.experiments.execution import load_execution_config
+
+        updates.update(derived)
+        execution = load_execution_config(root / derived["execution_profile"])
+        workers = execution.unit_preparation.workers
+        updates["execution"] = {**base.execution.model_dump(), "cpu_workers": workers}
+    if "benchmark_source_locks" in inputs:
+        updates["metadata"]["benchmark_source_locks"] = inputs["benchmark_source_locks"]
     config = Step8BenchmarkConfig.model_validate({**base.model_dump(), **updates})
     profile = load_runtime_profile(root / config.runtime_profile)
     gated = [s for s in profile.services if s.metadata.get("requires_capacity_receipt")]
@@ -467,7 +513,9 @@ def _recover_campaign(settings: Settings, config: Step8BenchmarkConfig) -> Path 
     return next(iter(matches), None)
 
 
-def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> dict[str, Any]:
+def _pointer(
+    settings: Settings, run: Path, variant: str, directory: Path, *, planned: bool = False
+) -> dict[str, Any]:
     root = settings.project_root.resolve()
     output = settings.outputs_path / "step8"
     if _local(directory, output).parent != output:
@@ -478,7 +526,12 @@ def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> di
     campaign_path = _local(manifests / "campaign.json", manifests)
     campaign = BenchmarkCampaignManifest.model_validate_json(campaign_path.read_bytes())
     selections = list(_local(manifests / "selections", manifests).glob("*.json"))
-    membership = _original_membership(root, _local(root / config.partition_dir, run / "inputs"))
+    request = config.release_request
+    datasets = _selected_datasets(request)
+    digest = plan_hash(request) if request else None
+    membership = _original_membership(
+        root, _local(root / config.partition_dir, run / "inputs"), datasets
+    )
     if (
         len(selections) != 1
         or config != load_benchmark_config(_local(manifests / "config.json", manifests))
@@ -488,6 +541,16 @@ def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> di
         or config.metadata.get("source_identity") != _source_identity(root)
         or config.metadata.get("dataset_split_version") != _SPLIT_VERSION
         or campaign.phase is not CampaignPhase.EXPLORATION
+        or campaign.release_plan_hash != digest
+        or set(campaign.snapshot_ids) != set(datasets)
+        or (
+            request
+            and config.metadata.get("benchmark_source_locks") != _source_locks(root, datasets)
+        )
+        or (
+            request is not None
+            and (request["run_id"] != run.name or variant not in request["variants"])
+        )
         or campaign.protocol != make_protocol(config, root)
         or campaign.paper_result
         or campaign.protocol_freeze_hash is not None
@@ -502,7 +565,8 @@ def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> di
         or selection.phase is not CampaignPhase.EXPLORATION
         or selection.selection != "dev-all"
         or selection.partition_hash != campaign.protocol.partition_hash
-        or set(selection.query_ids) != set(_DATASETS)
+        or selection.release_plan_hash != digest
+        or set(selection.query_ids) != set(datasets)
         or any(
             canonical_content_hash(sorted(ids))
             != membership["datasets"][d.value]["development_sha256"]
@@ -510,7 +574,36 @@ def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> di
         )
     ):
         raise ValueError("exploration_selection_identity_mismatch")
+    inventory_sha = sha256_file(
+        _local(manifests / f"jobs-{selection.content_hash}.json", manifests)
+    )
+    requirements = {}
+    if request:
+        from pmmc.experiments.release_models import stage_aliases
+
+        # The native planner has just verified every private payload. Freeze
+        # their alias projection once so read-only consumers need not rescan
+        # tens of thousands of job files to validate an existing pointer.
+        path = _local(manifests / f"model-aliases-{selection.content_hash}.json", manifests)
+        identity = dict(
+            campaign_id=campaign.campaign_id,
+            selection_hash=selection.content_hash,
+            plan_hash=digest,
+            job_inventory_sha256=inventory_sha,
+        )
+        if planned:
+            aliases = stage_aliases(directory, campaign, selection.content_hash)
+            write_json(path, {**identity, "aliases": aliases}, immutable=True)
+        saved = json.loads(path.read_bytes())
+        requirements = saved.pop("aliases")
+        if saved != identity:
+            raise ValueError("release_model_inventory_binding_mismatch")
     return {
+        **(
+            {"release_plan_hash": digest, "model_aliases_by_stage": requirements}
+            if digest is not None
+            else {}
+        ),
         "state": "planned",
         "phase": "exploration",
         "selection": "dev-all",
@@ -528,13 +621,12 @@ def _pointer(settings: Settings, run: Path, variant: str, directory: Path) -> di
         "selection_hash": selection.content_hash,
         "exposure_hash": campaign.protocol.exposure_manifest_hash,
         "selected": {d.value: len(ids) for d, ids in selection.query_ids.items()},
-        "job_inventory_sha256": sha256_file(
-            _local(manifests / f"jobs-{selection.content_hash}.json", manifests)
-        ),
+        "job_inventory_sha256": inventory_sha,
         "source_identity": config.metadata["source_identity"],
         "runtime_sha256": sha256_file(root / config.runtime_profile),
         "execution_sha256": sha256_file(root / config.execution_profile),
-        "capacity_calibration_required": True,
+        "capacity_calibration_required": not request
+        or any("answer-qwen3.5-27b" in aliases for aliases in requirements.values()),
         "gpu_benchmark_ready": False,
         "paper_result": False,
         "provider_calls": 0,
@@ -556,10 +648,13 @@ def exploration_campaign_directory(settings: Settings, run_id: str, *, variant: 
 def prepare_exploration(settings: Settings, run_id: str, *, variant: str = "wr") -> dict[str, Any]:
     """Freeze one input cohort per ID; publish one immutable native plan per variant."""
     run = _run_root(settings, run_id, variant)
+    request = plan_from_environment(os.environ)
+    if request and (request["run_id"] != run_id or variant not in request["variants"]):
+        raise ValueError("exploration_request_run_or_variant_mismatch")
     config_path = _local(run / variant / "benchmark.yaml", run)
     pointer = config_path.parent / "pointer.json"
     with _lock(run / ".prepare.lock") as lock_fd:
-        inputs = _bootstrap_inputs(settings, run)
+        inputs = _bootstrap_inputs(settings, run, request)
         if inputs["source_identity"] != _source_identity(settings.project_root.resolve()):
             raise ValueError("exploration_source_changed_use_new_run_id")
         config = _config(settings, run, variant, inputs)
@@ -572,6 +667,6 @@ def prepare_exploration(settings: Settings, run_id: str, *, variant: str = "wr")
         directory = _plan(settings, config_path, existing, lock_fd=lock_fd)
         if existing is not None and directory != existing:
             raise ValueError("exploration_plan_replaced_campaign")
-        result = _pointer(settings, run, variant, directory)
+        result = _pointer(settings, run, variant, directory, planned=True)
         write_json(pointer, result, immutable=True)
         return result

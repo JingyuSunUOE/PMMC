@@ -344,6 +344,9 @@ def build_runtime_plan(
 ) -> ManagedRuntimePlan:
     if not inventory.devices:
         raise RuntimePlanningError("the Pod exposes no GPUs")
+    visible = profile.metadata.get("release_visible_gpus")
+    if visible is not None and (type(visible) is not int or len(inventory.devices) != visible):
+        raise RuntimePlanningError("actual GPU inventory differs from the frozen single-node request")
     if "h100" in profile.hardware_class.lower() and any(
         "h100" not in device.name.lower() for device in inventory.devices
     ):

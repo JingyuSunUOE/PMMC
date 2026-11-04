@@ -4,35 +4,41 @@ import re
 from decimal import Decimal
 
 DEFAULTS = {
-    "postgres": (6, 32),
-    "minio": (2, 8),
-    "control": (20, 128),
-    "gpu": (64, 600),
-    "prepare": (16, 96),
+    "postgres": (1, 2),
+    "minio": (1, 2),
+    "control": (2, 8),
+    "gpu": (4, 32),
+    "prepare-capacity": (4, 32),
+    "prepare": (2, 8),
+    "assets": (2, 4),
+    "analysis-report": (2, 8),
     "iam": (1, 1),
-    "bootstrap": (4, 16),
-    "models": (4, 32),
+    "bootstrap": (1, 4),
+    "models": (2, 8),
     "pointer": (1, 1),
     "quote": (4, 16),
     "approve": (4, 16),
 }
 
 
-def peak(cfg, paid_workers=True):
+GPU_ROLES = ("gpu", "prepare-capacity")
+
+
+def peak(cfg, paid_workers=True, *, roles=None, services=True):
+    """Peak of sequential phases, not the sum of mutually exclusive Jobs."""
     r = cfg["resources"]
-    roles = [["postgres", "minio", s] for s in ("prepare", "bootstrap", "iam", "quote", "approve")]
-    if paid_workers:
-        roles.extend(
-            [
-                ["postgres", "minio", "models"],
-                ["postgres", "minio", "pointer"],
-                ["postgres", "minio", "control", "gpu"],
-            ]
-        )
+    if roles is None:
+        roles = set(DEFAULTS) - (set() if paid_workers else set(GPU_ROLES))
+    roles = set(roles) - {"postgres", "minio"}
+    phases = [[], *([s] for s in roles)]
+    if {"control", "gpu"} <= roles:
+        phases.append(["control", "gpu"])
+    if services:
+        phases = [["postgres", "minio", *phase] for phase in phases]
     return {
-        "cpu": max(sum(r[s]["cpu"] for s in row) for row in roles),
-        "memory": max(sum(r[s]["memory_gib"] for s in row) for row in roles) * 2**30,
-        "nvidia.com/gpu": 8 if paid_workers else 0,
+        "cpu": max(sum(r[s]["cpu"] for s in row) for row in phases),
+        "memory": max(sum(r[s]["memory_gib"] for s in row) for row in phases) * 2**30,
+        "nvidia.com/gpu": cfg["topology"]["gpus"] if roles.intersection(GPU_ROLES) else 0,
     }
 
 
@@ -51,9 +57,9 @@ def quantity(q):
     return Decimal(m[1]) * mult[m[2]]
 
 
-def headroom(cfg, quotas, pods, *, workers):
+def headroom(cfg, quotas, pods, *, workers=True, roles=None, services=True):
     report = []
-    peak_use = peak(cfg, workers)
+    peak_use = peak(cfg, workers, roles=roles, services=services)
     for quota in quotas:
         status = quota.get("status", {})
         for key, limit in (status.get("hard") or quota["spec"]["hard"]).items():
@@ -65,12 +71,14 @@ def headroom(cfg, quotas, pods, *, workers):
             hard, used = quantity(limit), quantity(status["used"][key])
             held = Decimal(0)
             # With scoped quotas we cannot prove these Pods count towards usage.
-            if not (quota["spec"].get("scopes") or quota["spec"].get("scopeSelector")):
+            if services and not (quota["spec"].get("scopes") or quota["spec"].get("scopeSelector")):
                 for pod in pods:
                     if pod.get("status", {}).get("phase") in ("Failed", "Succeeded"):
                         continue
                     for c in pod["spec"]["containers"]:
-                        if c["name"] not in DEFAULTS:
+                        # Only persistent services are already included in every phase.
+                        # Other active Jobs may belong to a different run.
+                        if c["name"] not in ("postgres", "minio"):
                             continue
                         field = "limits" if key.startswith("limits.") else "requests"
                         held += quantity(c.get("resources", {}).get(field, {}).get(short, 0))

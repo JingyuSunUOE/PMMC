@@ -82,8 +82,8 @@ def test_portable_model_and_capacity_inputs():
     assert runtime.model_lock_path == config.model_lock
     (gated,) = [s for s in runtime.services if s.metadata.get("requires_capacity_receipt")]
     assert gated.metadata["frozen_replica_topology"] == {
-        "tensor_parallel_size": 2,
-        "replica_count": 4,
+        "tensor_parallel_size": 1,
+        "replica_count": 1,
     }
     assert release.capacity_image_workload(gated, multimodal=True).layouts
 
@@ -409,3 +409,42 @@ def test_invalid_owner_has_no_side_effect(tmp_path, name, variant):
             Settings(_env_file=None, project_root=tmp_path), name, variant=variant
         )
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("benchmark,stage", [("memlens", "baselines"), ("memgallery", "main")])
+def test_native_subset_without_other_benchmark(project, monkeypatch, benchmark, stage):
+    from pmmc.experiments.release_models import selected_release_model_aliases
+    from pmmc.release_plan import normalize_plan, plan_hash
+
+    other = project.memgallery_path if benchmark == "memlens" else project.memlens_path
+    other.rename(other.with_name("not-mounted"))
+    raw = dict(
+        run_id="subset",
+        stage=stage,
+        benchmarks=[benchmark],
+        models=["answer-qwen3.5-27b" if stage == "main" else "answer-qwen3.5-9b"],
+        components=["compile" if stage == "main" else "answer"],
+    )
+    if stage == "baselines":
+        raw["methods"] = ["full_context_captions"]
+    request = normalize_plan(raw)
+    monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps(request))
+    pointer = release.prepare_exploration(project, "subset")
+    assert pointer["selected"] == {benchmark: 1 if benchmark == "memlens" else 4}
+    denominators = project.project_root / pointer["campaign_dir"] / "reports/denominators.json"
+    assert set(json.loads(denominators.read_bytes())) == {benchmark}
+    assert pointer["release_plan_hash"] == plan_hash(request)
+    config = release.load_benchmark_config(project.project_root / pointer["config_path"])
+    assert config.metadata["release_request"] == request
+    assert release.prepare_exploration(project, "subset") == pointer
+    assert set(pointer["model_aliases_by_stage"]) == {stage}
+    aliases = selected_release_model_aliases(project, config)
+    assert aliases == pointer["model_aliases_by_stage"][stage]
+    assert "answer-qwen3.5-27b" not in aliases and not pointer["capacity_calibration_required"]
+    if stage == "baselines":
+        assert aliases == ["answer-qwen3.5-9b", "grounding-qwen3.5-9b"]
+    else:
+        assert "compiler-qwen3.5-9b" in aliases
+    monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps({**request, "components": []}))
+    with pytest.raises(ValueError, match="request_changed"):
+        release.prepare_exploration(project, "subset")

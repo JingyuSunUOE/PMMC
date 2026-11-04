@@ -2275,6 +2275,8 @@ def calibrate_runtime(
     verification_policy: ModelVerificationPolicy | None = None,
     verified_cache_manifest_path: Path | None = None,
     paper_result: bool = False,
+    logical_stage: str | None = None,
+    verify_only: bool = False,
 ) -> tuple[list[RuntimeCalibration], Path]:
     """Start each distinct service and persist hardware-bound observed memory."""
 
@@ -2286,6 +2288,7 @@ def calibrate_runtime(
         prepared = prepare_runtime(
             settings,
             profile_path=profile_path,
+            logical_stage=logical_stage,
             verification_policy=verification_policy,
             verified_cache_manifest_path=verified_cache_manifest_path,
             paper_result=paper_result,
@@ -2293,7 +2296,7 @@ def calibrate_runtime(
         )
         runtime_lock.set_runtime_id(prepared.plan.runtime_id)
         try:
-            return _calibrate_prepared_runtime(settings, prepared)
+            return _calibrate_prepared_runtime(settings, prepared, verify_only=verify_only)
         except BaseException as exc:
             try:
                 if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
@@ -2308,6 +2311,8 @@ def calibrate_runtime(
 def _calibrate_prepared_runtime(
     settings: Settings,
     prepared: PreparedRuntime,
+    *,
+    verify_only: bool = False,
 ) -> tuple[list[RuntimeCalibration], Path]:
     started_at = utc_now()
     starting_session = _runtime_session(
@@ -2361,6 +2366,8 @@ def _calibrate_prepared_runtime(
                 )
                 continue
             _calibration_cache_log(prepared, spec, identifier, "identity_miss", calibration_started)
+            if verify_only:
+                raise ManagedRuntimeError("release runtime calibration missing for physical allocation")
             single_stage = identity_stage.model_copy(update={"stage_id": f"calibrate:{identifier}"})
             try:
                 with ActiveRuntimeStage(

@@ -18,6 +18,7 @@ if sys.version_info < (3, 11):  # noqa: UP036 - often invoked via an older syste
     sys.exit("pmmc: the host launcher requires Python 3.11 or later")
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from release_host.cli import main  # noqa: E402
 
 if __name__ == "__main__":

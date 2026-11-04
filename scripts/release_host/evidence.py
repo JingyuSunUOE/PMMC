@@ -38,6 +38,15 @@ NUMBERS = {
     "numerator",
     "count",
     "observed",
+    "bytes",
+    "total_bytes",
+    "bytes_downloaded",
+    "cached_files",
+    "files",
+    "files_completed",
+    "elapsed_seconds",
+    "items_per_second",
+    "cache_hits",
 }
 FLAGS = {
     "paid_authorized",
@@ -102,7 +111,9 @@ def safe_log(text):
         if start >= 0:
             try:
                 value = json.loads(line[start:])
-                event = re.search(r"(?:^|\s)(STEP8_[A-Z0-9_]{1,48}|PMMC_RELEASE)\s*$", line[:start])
+                event = re.search(
+                    r"(?:^|\s)(STEP8_[A-Z0-9_]{1,48}|PMMC_[A-Z0-9_]{1,48})\s*$", line[:start]
+                )
                 if not isinstance(value, dict):
                     continue
                 if not event and value.get("protocol") not in (

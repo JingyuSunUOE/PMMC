@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from re import fullmatch
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -41,17 +42,56 @@ class BudgetExceededError(RuntimeError):
     """Actual spend plus worst-case in-flight reservations exceeds approval."""
 
 
+def _stop_once(approval: BenchmarkBudgetApprovalModel, actor: str, reason: str) -> None:
+    if approval.stopped_at is None:
+        approval.stopped_at = datetime.now(UTC)
+        approval.stopped_by = actor
+        approval.stop_reason = reason
+
+
+def _digest(value: Any) -> bool:
+    return isinstance(value, str) and fullmatch(r"[a-f0-9]{64}", value) is not None
+
+
+def validate_budget_policy(limit: Decimal | None, uncapped: bool) -> None:
+    if uncapped != (limit is None):
+        raise ValueError("choose exactly one of --limit-usd or --uncapped")
+    if limit is not None and (
+        not limit.is_finite() or not 0 < limit < 10**12
+        or limit != limit.quantize(Decimal("0.00000001"))
+    ):
+        raise ValueError("explicit positive finite NUMERIC(20,8) limit required")
+
+
+def require_budget_binding(
+    row: Any, *, campaign_id: str, selection_hash: str,
+    plan_hash: str | None, scope_hash: str | None,
+) -> None:
+    """Verify an existing capability, never infer a child from its parent."""
+    if plan_hash is None and scope_hash is None:
+        if (getattr(row, "plan_hash", None) is None and row.limit_usd is not None
+                and (row.campaign_id, row.selection_hash) == (campaign_id, selection_hash)):
+            return
+    elif (_digest(plan_hash) and _digest(scope_hash) and row.plan_hash == plan_hash
+          and any((member["campaign_id"], member["selection_hash"]) == (campaign_id, selection_hash)
+                  and scope_hash in member["scopes"].values()
+                  for member in row.plan_bindings.values())):
+        return
+    raise ValueError("release_budget_plan_or_scope_binding_mismatch")
+
+
 async def _insert_exact(
     session: AsyncSession,
     model: Any,
     key: str,
     values: dict[str, Any],
     compare: tuple[str, ...] = ("payload",),
-) -> None:
+) -> Any:
     await session.execute(insert(model).values(**values).on_conflict_do_nothing())
     row = await session.get(model, values[key])
     if row is None or any(getattr(row, field) != values[field] for field in compare):
         raise ValueError("immutable campaign fact conflicts with existing identity")
+    return row
 
 
 class PostgresBenchmarkRepository:
@@ -424,20 +464,45 @@ class PostgresBenchmarkRepository:
         selection_hash: str,
         approver_id: str,
         rate_card_hash: str,
-        limit_usd: Decimal,
+        limit_usd: Decimal | None,
+        uncapped: bool = False,
+        plan_hash: str | None = None,
+        plan_bindings: dict | None = None,
     ) -> str:
-        if not limit_usd.is_finite() or limit_usd <= 0 or not approver_id:
-            raise ValueError("positive finite budget and explicit approver required")
-        identity = {
+        validate_budget_policy(limit_usd, uncapped)
+        if not approver_id.strip() or (uncapped and plan_hash is None):
+            raise ValueError("explicit approver and plan-bound uncapped policy required")
+        identity: dict[str, Any] = {
             "campaign_id": campaign_id,
             "selection_hash": selection_hash,
             "approver_id": approver_id,
             "rate_card_hash": rate_card_hash,
-            "limit_usd": str(limit_usd),
+            "limit_usd": str(limit_usd) if limit_usd is not None else None,
         }
+        if plan_hash is not None or plan_bindings is not None:
+            if not _digest(plan_hash) or not plan_bindings:
+                raise ValueError("immutable plan and native bindings required")
+            members = set()
+            for member in plan_bindings.values():
+                if (not member["campaign_id"] or not _digest(member["selection_hash"])
+                        or not member["scopes"] or not all(
+                            _digest(digest) for digest in member["scopes"].values())):
+                    raise ValueError("invalid native budget scope")
+                members.add((member["campaign_id"], member["selection_hash"]))
+            if (campaign_id, selection_hash) not in members or len(members) != len(plan_bindings):
+                raise ValueError("ambiguous plan budget bindings")
+            identity.update(plan_hash=plan_hash, plan_bindings=plan_bindings)
+            if limit_usd is not None:
+                identity["limit_usd"] = format(limit_usd.normalize(), "f")
         approval_id = canonical_content_hash(identity)
         async with self.sessions.begin() as session:
-            await _insert_exact(
+            if plan_bindings:
+                for member in plan_bindings.values():
+                    child = await session.get(BenchmarkSelectionModel, member["selection_hash"])
+                    if (child is None or child.campaign_id != member["campaign_id"]
+                            or child.payload.get("release_plan_hash") != plan_hash):
+                        raise ValueError("release_budget_selection_not_registered")
+            approval = await _insert_exact(
                 session,
                 BenchmarkBudgetApprovalModel,
                 "approval_id",
@@ -455,9 +520,35 @@ class PostgresBenchmarkRepository:
                     "approver_id",
                     "rate_card_hash",
                     "limit_usd",
-                ),
+                ) + (("plan_hash", "plan_bindings") if plan_hash else ()),
             )
+            if plan_hash and approval.stopped_at is not None:
+                raise ValueError("release_plan_approval_permanently_stopped")
         return approval_id
+
+    async def stop_plan_budget(
+        self, *, approval_id: str, plan_hash: str, campaign_id: str, selection_hash: str,
+        operator_id: str, reason_code: str,
+    ) -> dict[str, Any]:
+        if (not _digest(approval_id) or not _digest(plan_hash) or not _digest(selection_hash)
+                or not fullmatch(r"[A-Za-z0-9][A-Za-z0-9.@_-]{0,255}", operator_id)
+                or not fullmatch(r"[a-z][a-z0-9_]{0,127}", reason_code)):
+            raise ValueError("release_budget_stop_requires_plan_selection_operator_and_reason_code")
+        async with self.sessions.begin() as session:
+            row = await session.get(BenchmarkBudgetApprovalModel, approval_id, with_for_update=True)
+            if (row is None or row.plan_hash != plan_hash or not any(
+                (m["campaign_id"], m["selection_hash"]) == (campaign_id, selection_hash)
+                for m in row.plan_bindings.values()
+            )):
+                raise ValueError("release_budget_stop_plan_or_selection_mismatch")
+            _stop_once(row, operator_id, reason_code)
+            return {
+                "approval_id": row.approval_id, "plan_hash": row.plan_hash,
+                "selection_hash": selection_hash, "campaign_id": campaign_id,
+                "new_calls_stopped": True, "stopped_at": row.stopped_at.isoformat(),
+                "stopped_by": row.stopped_by, "stop_reason": row.stop_reason,
+                "settled_usd": str(row.settled_usd), "reserved_usd": str(row.reserved_usd),
+            }
 
     async def reserve(
         self,
@@ -466,8 +557,11 @@ class PostgresBenchmarkRepository:
         request_hash: str,
         provider: str,
         worst_case_usd: Decimal,
+        *,
+        binding: dict[str, str] | None = None,
     ) -> str:
-        if not worst_case_usd.is_finite() or worst_case_usd < 0:
+        if (not worst_case_usd.is_finite() or not 0 <= worst_case_usd < 10**12
+                or worst_case_usd != worst_case_usd.quantize(Decimal("0.00000001"))):
             raise ValueError("finite nonnegative worst-case cost required")
         async with self.sessions.begin() as session:
             approval = await session.get(
@@ -475,6 +569,10 @@ class PostgresBenchmarkRepository:
             )
             if approval is None:
                 raise BudgetExceededError("explicit_selection_budget_approval_required")
+            if approval.plan_hash is not None or binding is not None:
+                if not binding:
+                    raise ValueError("release_budget_binding_required")
+                require_budget_binding(approval, **binding)
             old = await session.get(BenchmarkSpendReservationModel, request_id)
             if old is not None:
                 if (
@@ -485,21 +583,31 @@ class PostgresBenchmarkRepository:
                 ):
                     raise ValueError("request reservation identity conflict")
                 return old.state
-            if approval.settled_usd + approval.reserved_usd + worst_case_usd > approval.limit_usd:
-                raise BudgetExceededError("approved_api_budget_exhausted")
-            approval.reserved_usd += worst_case_usd
-            session.add(
-                BenchmarkSpendReservationModel(
-                    request_id=request_id,
-                    approval_id=approval_id,
-                    request_hash=request_hash,
-                    provider=provider,
-                    reserved_usd=worst_case_usd,
-                    state="reserved",
-                    created_at=datetime.now(UTC),
+            if approval.stopped_at is not None:
+                raise BudgetExceededError("release_plan_approval_permanently_stopped")
+            if (approval.limit_usd is not None
+                    and approval.settled_usd + approval.reserved_usd + worst_case_usd
+                    > approval.limit_usd):
+                if approval.plan_hash is None:
+                    raise BudgetExceededError("approved_api_budget_exhausted")
+                # Commit the stop *before* raising. Other stages may still be settling
+                # their admitted calls, but they cannot launch new ones on this plan.
+                _stop_once(approval, "system", "approved_api_budget_exhausted")
+            else:
+                approval.reserved_usd += worst_case_usd
+                session.add(
+                    BenchmarkSpendReservationModel(
+                        request_id=request_id,
+                        approval_id=approval_id,
+                        request_hash=request_hash,
+                        provider=provider,
+                        reserved_usd=worst_case_usd,
+                        state="reserved",
+                        created_at=datetime.now(UTC),
+                    )
                 )
-            )
-            return "reserved"
+                return "reserved"
+        raise BudgetExceededError("approved_api_budget_exhausted")
 
     async def settle(
         self, request_id: str, actual_usd: Decimal | None, response_hash: str | None
@@ -532,8 +640,16 @@ class PostgresBenchmarkRepository:
                 reservation.response_hash = response_hash
                 return  # Unknown usage retains its worst-case reservation.
             if actual_usd > reservation.reserved_usd:
-                raise BudgetExceededError("provider_exceeded_frozen_worst_case")
-            approval.reserved_usd -= reservation.reserved_usd
-            approval.settled_usd += actual_usd
-            reservation.actual_usd, reservation.response_hash = actual_usd, response_hash
-            reservation.state = "settled"
+                if approval.plan_hash is None:
+                    raise BudgetExceededError("provider_exceeded_frozen_worst_case")
+                # The price bound itself failed. Preserve the disputed response and
+                # hold, and fence every child until the operator reconciles it.
+                _stop_once(approval, "system", "provider_exceeded_frozen_worst_case")
+                reservation.state, reservation.response_hash = "unknown", response_hash
+            else:
+                approval.reserved_usd -= reservation.reserved_usd
+                approval.settled_usd += actual_usd
+                reservation.actual_usd, reservation.response_hash = actual_usd, response_hash
+                reservation.state = "settled"
+                return
+        raise BudgetExceededError("provider_exceeded_frozen_worst_case")

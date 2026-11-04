@@ -400,7 +400,7 @@ _BACKEND_METHODS = {
     "execution": ("_query_execute",),
     "answers": ("_baseline_answer", "_query_answer", "_native_fallback_generate"),
     "grounding": ("_baseline_grounding", "_query_grounding", "_native_fallback_ground"),
-    "evaluation": ("_evaluate", "_primary_evaluate", "_analysis_evaluate"),
+    "evaluation": ("_evaluate", "_primary_evaluate", "_analysis_evaluate", "_baseline_evaluate"),
 }
 _DATABASE_COMMON = (
     "infrastructure/database/engine.py",
@@ -646,6 +646,9 @@ class BenchmarkStageJob(BaseSchema):
     dependency_ids: list[NonEmptyStr] = Field(default_factory=list)
     operation: NonEmptyStr
     parameters: JsonDict = Field(default_factory=dict)
+    release_stages: tuple[Literal["main", "analysis", "baselines"], ...] = Field(
+        default=(), exclude_if=lambda stages: not stages
+    )
 
     @model_validator(mode="after")
     def _dependencies(self) -> BenchmarkStageJob:
