@@ -1,0 +1,21 @@
+protocol_version: questioner-quality-pilot-v2
+partition_protocol: scenario-balanced-five-fold-v2
+development_fold: 0
+fold_count: 5
+partition_seed: 0
+queries_per_dataset: 2
+candidate_review_count: 16
+coverage_review_count: 4
+secondary_review_fraction: 0.25
+question_budgets: [1, 2, 4, 8]
+match_ks: [1, 3, 5, 10, 20, 50]
+scientific_gate: manual_approval
+bootstrap_seed: 0
+bootstrap_repetitions: 200
+underpowered_stratum_size: 5
+eligible_candidate_reviews_per_dataset: 4
+rejected_candidate_reviews_per_dataset: 2
+duplicate_candidate_reviews_per_dataset: 2
+coverage_failure_reviews_per_dataset: 1
+matching_failure_reviews_per_dataset: 1
+memgallery_max_queries_per_scenario: 2

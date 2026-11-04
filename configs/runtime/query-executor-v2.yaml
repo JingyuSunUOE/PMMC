@@ -1,0 +1,41 @@
+protocol_version: pmmc-query-executor-v2
+matcher_version: pmmc-qbank-matcher-v2
+graph_version: pmmc-online-query-graph-v2
+sufficiency_policy_version: query-runtime-evidence-v2
+answer_prompt_version: pmmc-answer-contract-v2.1
+answer_prompt_path: prompts/runtime/pmmc_answer_contract_v2_1.txt
+fallback_policy: native_mm_rag_v1
+match_top_k: 50
+rrf_constant: 60
+text_query_weights:
+  lexical: 0.40
+  text: 0.60
+multimodal_query_weights:
+  lexical: 0.20
+  text: 0.35
+  multimodal: 0.45
+active_match_threshold: 0.60
+active_gap_threshold: 0.05
+threshold_grid: [0.50, 0.60, 0.70, 0.80]
+gap_grid: [0.00, 0.05, 0.10]
+question_budgets: [1, 2, 4, 8]
+rounds: [0, 1, 2, 3]
+active_round: 2
+question_budget: 8
+matcher_workers: 32
+executor_workers: 32
+database_semaphore: 24
+model_concurrency: 64
+max_answer_tokens: 512
+reranker_version: pmmc-bounded-reranker-v1
+reranker_prompt_version: pmmc-qbank-reranker-v1
+reranker_model_alias: reranker-qwen3.5-9b
+reranker_top_k: 20
+base_score_weight: 0.40
+reranker_score_weight: 0.60
+lexical_term_limit: 12
+query_evidence_relevance_threshold: 0.55
+answer_contract_version: strict-answer-contract-v2
+answer_output_schema_version: 0.1.0
+answer_format_retry_policy: answer-format-feedback-v2
+answer_format_retry_sha256: 02d64037b37738300311a2df2e2d957e73103058b59e945a1edbfde57d0a2a38

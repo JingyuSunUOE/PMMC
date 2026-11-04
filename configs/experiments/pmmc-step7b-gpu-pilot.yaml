@@ -1,0 +1,67 @@
+launcher_schema_version: 0.10.0
+experiment_name: step7b-reranked-verified-qbank-executor-pilot
+target: pmmc_step7b_executor_pilot
+mode: paper
+methods: []
+models:
+  answer_model: answer-qwen3.5-9b
+  judge_model: judge-qwen3.5-9b
+  text_embedding_model: qwen3-embedding-8b
+  contrastive_embedding_model: siglip2-so400m-patch14-384
+  multimodal_embedding_model: qwen3-vl-embedding-8b
+  compiler_model: compiler-qwen3.5-9b
+  reranker_model: reranker-qwen3.5-9b
+selection:
+  datasets: [memlens, memgallery]
+  question_types: []
+  source_categories: []
+  scenario_ids: []
+  query_ids: []
+  seed: 0
+  shard_count: 1
+  shard_index: 0
+  include_excluded: false
+infrastructure:
+  mode: self_contained
+  wait_timeout_seconds: 300
+  migrate_database: true
+  sync_assets: true
+  archive_snapshot: false
+  archive_referenced_model_artifacts: true
+progress:
+  report_interval_seconds: 30
+runtime_profile_path: configs/runtime/h100-step7b-paper.yaml
+execution_profile_path: configs/execution/h100-replicated-8gpu-step7b-v1.yaml
+questioner_config_path: configs/compiler/questioner-v3.5.yaml
+questioner_pilot_config_path: configs/compiler/questioner-quality-step7b-pilot.yaml
+planner_config_path: configs/compiler/planner-v1.4.yaml
+doubter_config_path: configs/compiler/doubter-v1.2.yaml
+compiler_foundation_config_path: configs/compiler/pmmc-v6.yaml
+qbank_semantic_config_path: configs/compiler/qbank-semantic-match-v4.yaml
+query_executor_config_path: configs/runtime/query-executor-v2.yaml
+model_registry_path: configs/models/paper.yaml
+model_registry_overlays: []
+download_policy: auto
+model_verification_policy: cached_receipt
+calibration_policy: auto
+evaluate: true
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+answer_batch_size: 8
+embedding_batch_size: 64
+multimodal_embedding_batch_size: 16
+model_concurrency: 64
+metadata:
+  paper_result: false
+  producer_stage: questioner_v35_planner_v14_doubter_v12_executor_v2
+  pilot_mode: gpu_pilot
+  run_conformance: true
+  prefix_query_count_per_dataset: 2
+  main_query_count_per_dataset: 16
+  active_round: 2
+  max_round: 3
+  active_question_budget: 8
+  match_threshold: 0.60
+  gap_threshold: 0.05
+  semantic_contract_version: step7b-reranked-verified-qbank-v1
+

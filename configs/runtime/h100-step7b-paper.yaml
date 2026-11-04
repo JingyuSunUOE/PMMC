@@ -1,0 +1,79 @@
+profile_version: pmmc-runtime-profile-v1
+profile_name: h100-step7b-paper
+hardware_class: nvidia-h100-80gb
+model_lock_path: artifacts/models/paper.lock.json
+weight_safety_factor: 1.10
+gpu_reserve_fraction: 0.10
+gpu_reserve_min_gib: 4.0
+service_overhead_gib: 4.0
+gpu_memory_utilization_max: 0.90
+telemetry_interval_seconds: 2.0
+shutdown_timeout_seconds: 60
+require_calibration_in_paper: true
+enable_litellm: true
+litellm_port: 4000
+stage_order:
+  - gateway_smoke
+  - embedding_text
+  - embedding_contrastive
+  - embedding_multimodal
+  - compiler
+  - answer
+  - judge
+services:
+  - service_id: qwen35-shared-chat
+    role: compiler
+    backend: vllm_chat
+    model_alias: compiler-qwen3.5-9b
+    stages: [gateway_smoke, compiler, answer, judge]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8101
+    metadata:
+      served_roles: [answer, judge, reranker]
+      physical_weight_identity: Qwen/Qwen3.5-9B
+      supports_thinking_control: true
+  - service_id: text-embedding-qwen3
+    role: text_embedding
+    backend: vllm_embedding
+    model_alias: qwen3-embedding-8b
+    stages: [gateway_smoke, embedding_text]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1, 2]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8102
+  - service_id: multimodal-embedding-qwen3vl
+    role: multimodal_embedding
+    backend: vllm_multimodal_embedding
+    model_alias: qwen3-vl-embedding-8b
+    stages: [gateway_smoke, embedding_multimodal]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8103
+  - service_id: contrastive-embedding-siglip2
+    role: contrastive_embedding
+    backend: transformers_contrastive
+    model_alias: siglip2-so400m-patch14-384
+    stages: [gateway_smoke, embedding_contrastive]
+    dtype: bfloat16
+    max_model_len: 64
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8104
+metadata:
+  placement_policy: exclusive_then_sequential
+  target_workload: pmmc_step7b
+  shared_chat_roles: [compiler, reranker, answer, judge]

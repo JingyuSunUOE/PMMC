@@ -1,0 +1,29 @@
+execution_protocol: pmmc-throughput-v1
+schedule: model-stage-major-v1
+unit_preparation:
+  workers: 32
+  max_tasks_per_child: 16
+  cache_policy: read_write
+  counter_backend: qwen-vl-cached-exact-v1
+  local_asset_cache: true
+qbank:
+  text_query_batch_size: 64
+  multimodal_query_batch_size: 16
+  embedding_concurrency: 32
+  # Coverage scoring is a small CPU-only tail of the pilot. Keep the approved
+  # pilot on the reference path while concurrent scoring is validated separately.
+  score_concurrency: 1
+checkpoint:
+  policy: milestone
+  interval_seconds: 1800
+  completed_jobs_interval: 250
+  retain_count: 2
+progress:
+  protocol: weighted-hierarchical-progress-v2
+replicas:
+  compiler: 8
+  text_embedding: 8
+  contrastive_embedding: 8
+  multimodal_embedding: 8
+  answer: 4
+  judge: 4

@@ -1,0 +1,17 @@
+answer_contract_version: typed-answer-contract-v3
+answer_prompt: prompts/runtime/pmmc_answer_contract_v3.txt
+answer_guided_schema: typed-answer-guided-json-v3
+max_output_tokens: 512
+thinking_mode: disabled
+format_retries: 1
+grounding:
+  policy_version: source-only-answer-grounding-v1
+  model_alias: grounding-qwen3.5-9b
+  prompt: prompts/runtime/answer_grounding_v1.txt
+  max_output_tokens: 512
+  format_retries: 1
+  assessment_source: model_assessed
+  supported_answers_only: true
+  failure_terminal: abstained
+  allowed_pmmc_alternative: fallback_required
+  source_boundary: actual_query_typed_answer_cited_source_evidence

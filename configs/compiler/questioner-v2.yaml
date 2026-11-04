@@ -1,0 +1,33 @@
+protocol_version: pmmc-questioner-v2
+prompt_version: pmmc-questioner-v2
+renderer_version: questioner-multimodal-renderer-v2
+parser_version: questioner-json-parser-v2
+unit_builder_version: session-anchor-candidate-set-v1
+gate_version: questioner-hard-gate-v1
+dedupe_version: questioner-exact-dedupe-v1
+matcher_version: qbank-hybrid-rrf-v1
+coverage_protocol_version: qbank-coverage-v1
+compiler_model_alias: compiler-qwen3.5-9b
+text_embedding_model_alias: qwen3-embedding-8b
+multimodal_embedding_model_alias: qwen3-vl-embedding-8b
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+max_images_per_unit: 8
+question_budget_max: 8
+max_paraphrases: 3
+job_max_attempts: 2
+text_embedding_batch_size: 32
+multimodal_embedding_batch_size: 8
+embedding_concurrency: 4
+rrf_constant: 60
+per_channel_top_k: 50
+question_budgets: [1, 2, 4, 8]
+match_ks: [1, 3, 5, 10, 20, 50]
+relation_order:
+  - adjacent_session
+  - shared_entity
+  - shared_image
+  - profile_preference
+  - temporal_neighbor
+gate_mode: report_only
+scientific_thresholds: {}

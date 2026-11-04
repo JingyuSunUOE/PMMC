@@ -1,0 +1,20 @@
+{
+  "dataset_split_version": "memlens32k-memgallery20-original-v2",
+  "reference_partition_hash": "2118aeb55a25db9e346a2cd4c0fa6ee74d84ae26f17be1a9c80359b0d4bb1096",
+  "datasets": {
+    "memlens": {
+      "full_snapshot_id": "memlens-4bf865094312f9a4",
+      "canonical_sha256": "e4c87af59470339f357b7004c27079e717c8d6927a9f458a74a68eb4e15c73e0",
+      "assignment_sha256": "27b54b75bc4ea8b931dc50e4954c57c2a939d6c5328774db8c41d64ca2326d5f",
+      "development_sha256": "63e109b0d4da1ad09a0c59cc86edf9af35dea28bd43e0946dee648c3677b2662",
+      "paper_sha256": "a42431c8ba84342be1c73118165e4b77356c2c7cffcacdde2ae06b4054955103"
+    },
+    "memgallery": {
+      "full_snapshot_id": "memgallery-b6e0fbd79ef2b0ee",
+      "canonical_sha256": "98ef51deca354c84d68795240d5dc2a0a1215e0f8071053065182bc191faff22",
+      "assignment_sha256": "53cd91e5336d3c167a33896af1b4a975155015fc822569bc53406874a0669360",
+      "development_sha256": "21c77df9b206b6066fa34d4e832dcf1a93c767824ed20ca62d2fd0b5c75573e3",
+      "paper_sha256": "efa01b55861707b18d503c32308b3a46a8384e4d8ee2d591982d709df6e7dcb8"
+    }
+  }
+}

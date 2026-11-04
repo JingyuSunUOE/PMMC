@@ -1,0 +1,35 @@
+mode: dev
+paths:
+  memlens_root: benchmarks/memlens
+  memgallery_root: benchmarks/memgallery
+  artifacts_dir: artifacts
+  outputs_dir: outputs
+  runs_dir: runs
+runtime:
+  benchmark_validation_level: fast
+  langfuse_tracing: true
+  litellm_fallback: true
+  cache_enabled: true
+models:
+  registry: configs/models/dev.yaml
+  request_timeout_seconds: 300
+  max_concurrency: 8
+  max_attempts: 3
+  require_actual_model_match: false
+baseline:
+  corpus_root: artifacts/baselines/corpora
+  window_strategy: session_token_window_v1
+  max_window_tokens: 512
+  max_images_per_window: 4
+  overlap_memory_units: 1
+  total_context_tokens: 32768
+  reserved_output_tokens: 1024
+persistence:
+  database_import_batch_size: 2000
+  experiment_write_batch_size: 1000
+  experiment_export_batch_size: 5000
+  experiment_job_lease_seconds: 900
+  experiment_artifact_prefix: runs
+  runtime_schema: pmmc_runtime
+  evaluation_schema: pmmc_evaluation
+  object_store_backend: s3

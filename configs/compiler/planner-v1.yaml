@@ -1,0 +1,15 @@
+protocol_version: pmmc-planner-v1
+prompt_version: pmmc-planner-v1
+renderer_version: planner-safe-alias-renderer-v1
+parser_version: planner-json-parser-v1
+schema_version: planner-program-schema-v1
+policy_version: planner-program-policy-v1
+operator_set_version: pmmc-operators-v2
+dry_run_policy: evidence_driven_v2
+planner_model_alias: compiler-qwen3.5-9b
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+candidates_per_batch: 4
+program_max_steps: 8
+operator_top_k_max: 50
+expansion_radius_max: 2

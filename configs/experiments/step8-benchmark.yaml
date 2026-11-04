@@ -1,0 +1,33 @@
+schema_version: "0.1.0"
+protocol_name: step8-scientific-contract-v3-gpt6-luna-haiku55
+partition_dir: artifacts/step8-inputs/partition
+exposure_manifest: artifacts/step8-inputs/exposure.json
+regression_manifest: artifacts/step8-inputs/development-regression.json
+model_lock: artifacts/models/step8-gpt6-luna-haiku55.lock.json
+model_registry: configs/models/step8.yaml
+questioner_config: configs/compiler/questioner-v3.6.yaml
+planner_config: configs/compiler/planner-v1.5.yaml
+doubter_config: configs/compiler/doubter-v1.3.yaml
+foundation_config: configs/compiler/pmmc-v7.yaml
+query_executor_config: configs/runtime/query-executor-v3.yaml
+runtime_profile: configs/runtime/h100-step8.yaml
+execution_profile: configs/execution/h100-replicated-8gpu-step8.yaml
+output_root: outputs/step8
+match_threshold: 0.60
+gap_threshold: 0.05
+text_relevance_threshold: 0.30
+multimodal_relevance_threshold: 0.30
+no_reranker_match_threshold: 0.60
+no_reranker_gap_threshold: 0.05
+execution:
+  development_budget_limit_usd: "20"
+  cpu_workers: 32
+  database_concurrency: 24
+  model_concurrency: 64
+  api_concurrency: 8
+  heartbeat_seconds: 30
+  lease_seconds: 900
+  checkpoint_seconds: 1800
+  checkpoint_jobs: 250
+  periodic_checkpoint_retain: 2
+  transfer_part_bytes: 2147483648

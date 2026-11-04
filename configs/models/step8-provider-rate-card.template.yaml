@@ -1,0 +1,35 @@
+# Intentionally invalid until every null is replaced with reviewed account data.
+# Luna rates: Standard global processing, <=272K input, reviewed 2026-09-30.
+# https://developers.openai.com/api/docs/models/gpt-6-luna
+# Haiku 5.5: Standard global, <=100K input, 5m cache writes; reviewed 2026-10-07.
+# https://platform.claude.com/docs/en/models/haiku-5-5/overview
+# Account RPM/TPM still require review; do not inherit the old Haiku quota approval.
+# account_scope is a stable non-secret
+# account/project label shared by every campaign using the same provider quota.
+# Use model_scope: '*' only for a genuinely shared account-wide quota; entries
+# sharing that scope must declare identical limits. Preserve the approved bytes.
+estimated: null
+models:
+  gpt-6-luna:
+    input_usd_per_million: "0.10"
+    output_usd_per_million: "0.50"
+    cached_input_usd_per_million: "0.01"
+    cache_creation_input_usd_per_million: "0.125"
+  claude-haiku-5-5:
+    input_usd_per_million: "0.10"
+    output_usd_per_million: "0.50"
+    cached_input_usd_per_million: "0.01"
+    cache_creation_input_usd_per_million: "0.125"
+rate_limits:
+  gpt-6-luna:
+    provider: openai
+    account_scope: null
+    model_scope: gpt-6-luna
+    requests_per_minute: null
+    tokens_per_minute: null
+  claude-haiku-5-5:
+    provider: anthropic
+    account_scope: null
+    model_scope: claude-haiku-5-5
+    requests_per_minute: null
+    tokens_per_minute: null

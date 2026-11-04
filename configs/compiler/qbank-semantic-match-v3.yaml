@@ -1,0 +1,14 @@
+protocol_version: qbank-semantic-match-v3
+prompt_version: pmmc-qbank-semantic-judge-v3
+renderer_version: qbank-semantic-judge-private-renderer-v3
+parser_version: qbank-semantic-judge-json-parser-v3
+schema_version: qbank-semantic-judge-schema-v3
+judge_model_alias: judge-qwen3.5-9b
+question_budgets: [1, 2, 4, 8]
+match_ks: [1, 3, 5, 10, 20, 50]
+candidate_pool_k: 50
+max_output_tokens: 512
+concurrency: 64
+temperature: 0.0
+top_p: 1.0
+seed: 0

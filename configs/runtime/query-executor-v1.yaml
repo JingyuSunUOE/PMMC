@@ -1,0 +1,29 @@
+protocol_version: pmmc-query-executor-v1
+matcher_version: pmmc-qbank-matcher-v1
+graph_version: pmmc-online-query-graph-v1
+sufficiency_policy_version: query-runtime-structural-v1
+answer_prompt_version: pmmc-answer-with-evidence-v1
+answer_prompt_path: prompts/runtime/pmmc_answer_with_evidence_v1.txt
+fallback_policy: native_mm_rag_v1
+match_top_k: 50
+rrf_constant: 60
+text_query_weights:
+  lexical: 0.5
+  text: 0.5
+multimodal_query_weights:
+  lexical: 0.3333333333
+  text: 0.3333333333
+  multimodal: 0.3333333334
+active_match_threshold: 0.60
+active_gap_threshold: 0.05
+threshold_grid: [0.50, 0.60, 0.70, 0.80]
+gap_grid: [0.00, 0.05, 0.10]
+question_budgets: [1, 2, 4, 8]
+rounds: [0, 1, 2, 3]
+active_round: 2
+question_budget: 8
+matcher_workers: 32
+executor_workers: 32
+database_semaphore: 24
+model_concurrency: 64
+max_answer_tokens: 4096

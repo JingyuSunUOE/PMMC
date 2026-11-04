@@ -1,0 +1,53 @@
+launcher_schema_version: 0.4.0
+experiment_name: five-foundational-baselines-paper
+target: foundational_baselines
+mode: paper
+methods:
+  - full_context_captions
+  - full_context_raw_images
+  - caption_text_rag
+  - contrastive_multimodal_rag
+  - native_multimodal_rag
+models:
+  answer_model: answer-qwen3.5-9b
+  judge_model: judge-qwen3.5-9b
+  text_embedding_model: qwen3-embedding-8b
+  contrastive_embedding_model: siglip2-so400m-patch14-384
+  multimodal_embedding_model: qwen3-vl-embedding-8b
+selection:
+  datasets: [memlens, memgallery]
+  question_types: []
+  source_categories: []
+  scenario_ids: []
+  query_ids: []
+  seed: 0
+  shard_count: 1
+  shard_index: 0
+  include_excluded: false
+infrastructure:
+  mode: self_contained
+  wait_timeout_seconds: 600
+  migrate_database: true
+  sync_assets: true
+  archive_snapshot: false
+progress:
+  report_interval_seconds: 30
+runtime_profile_path: configs/runtime/h100-paper.yaml
+execution_profile_path: configs/execution/h100-replicated-4gpu-v1.yaml
+model_registry_overlays: []
+download_policy: auto
+model_verification_policy: cached_receipt
+calibration_policy: auto
+evaluate: true
+retrieval_top_k: 50
+answer_top_k: 5
+total_context_tokens: 32768
+reserved_output_tokens: 1024
+answer_batch_size: 16
+embedding_batch_size: 64
+multimodal_embedding_batch_size: 16
+model_concurrency: 32
+metadata:
+  paper_result: true
+  component_matrix: true
+  protocol: five-foundational-baselines-v1

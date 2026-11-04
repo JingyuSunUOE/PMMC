@@ -1,0 +1,120 @@
+profile_version: pmmc-runtime-profile-v1
+profile_name: h100-step8
+hardware_class: nvidia-h100-80gb
+model_lock_path: artifacts/models/step8-gpt6-luna-haiku55.lock.json
+weight_safety_factor: 1.10
+gpu_reserve_fraction: 0.10
+gpu_reserve_min_gib: 4.0
+service_overhead_gib: 4.0
+gpu_memory_utilization_max: 0.90
+telemetry_interval_seconds: 2.0
+shutdown_timeout_seconds: 60
+require_calibration_in_paper: true
+enable_litellm: false
+litellm_port: 4000
+stage_order:
+  - gateway_smoke
+  - embedding_text
+  - embedding_contrastive
+  - embedding_multimodal
+  - compiler
+  - answer_9b
+  - answer_27b
+  - grounding
+  - judge
+services:
+  - service_id: qwen35-9b-shared-chat
+    role: compiler
+    backend: vllm_chat
+    model_alias: compiler-qwen3.5-9b
+    stages: [gateway_smoke, compiler, answer_9b, grounding, judge]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8101
+    metadata:
+      served_roles: [judge, reranker]
+      logical_roles: [compiler, reranker, answer, grounding, judge]
+      served_aliases: [answer-qwen3.5-9b, judge-qwen3.5-9b, reranker-qwen3.5-9b, grounding-qwen3.5-9b]
+      physical_weight_identity: Qwen/Qwen3.5-9B
+      supports_thinking_control: true
+      resource_class: gpu_9b
+      calibration_required: true
+      frozen_replica_topology: {tensor_parallel_size: 1, replica_count: 8}
+      calibrated_placement_options:
+        - {tensor_parallel_size: 1, replica_count: 8}
+  - service_id: qwen35-27b-answer
+    role: answer
+    backend: vllm_chat
+    model_alias: answer-qwen3.5-27b
+    stages: [answer_27b]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 4
+    tensor_parallel_candidates: [2]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1800
+    port: 8201
+    metadata:
+      physical_weight_identity: Qwen/Qwen3.5-27B
+      supports_thinking_control: true
+      resource_class: gpu_27b
+      calibration_required: true
+      frozen_replica_topology: {tensor_parallel_size: 2, replica_count: 4}
+      requires_capacity_receipt: true
+      capacity_receipt_filename: step8-qwen35-27b-capacity.json
+      # TP1x8 requires an explicit frozen profile change and matching measured receipt.
+      calibrated_placement_options:
+        - {tensor_parallel_size: 2, replica_count: 4}
+        - {tensor_parallel_size: 1, replica_count: 8}
+  - service_id: text-embedding-qwen3
+    role: text_embedding
+    backend: vllm_embedding
+    model_alias: qwen3-embedding-8b
+    stages: [gateway_smoke, embedding_text]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8301
+  - service_id: multimodal-embedding-qwen3vl
+    role: multimodal_embedding
+    backend: vllm_multimodal_embedding
+    model_alias: qwen3-vl-embedding-8b
+    stages: [gateway_smoke, embedding_multimodal]
+    dtype: bfloat16
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8401
+  - service_id: contrastive-embedding-siglip2
+    role: contrastive_embedding
+    backend: transformers_contrastive
+    model_alias: siglip2-so400m-patch14-384
+    stages: [gateway_smoke, embedding_contrastive]
+    dtype: bfloat16
+    max_model_len: 64
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1]
+    gpu_memory_utilization: 0.90
+    startup_timeout_seconds: 1200
+    port: 8501
+metadata:
+  placement_policy: exclusive_then_sequential
+  target_workload: pmmc_step8
+  binding_policy: exact_stage_and_model_alias
+  calibration_status: required_not_yet_measured
+  native_provider_resource_class: api
+  native_provider_offline_token_counting: step8-provider-context-budget-v1
+  campaign_services_in_gpu_pod: false
+  stage_replica_role:
+    answer_9b: compiler
+    grounding: compiler
+    answer_27b: answer

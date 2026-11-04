@@ -1,0 +1,24 @@
+protocol_version: pmmc-compiler-foundation-v3
+unit_builder_version: compiler-unit-v1
+operator_set_version: pmmc-operators-v3
+compiler_model_alias: compiler-qwen3.5-9b
+question_budget_max: 8
+r_max: 2
+program_max_steps: 8
+operator_top_k_max: 50
+total_evidence_max: 200
+operator_timeout_seconds: 60
+dry_run_policy: evidence_driven_v3
+vector_search_mode: exact
+fts_configuration: simple
+operators:
+  - retrieve_text_by_keyword
+  - retrieve_text_by_embedding
+  - retrieve_image_by_visual_embedding
+  - retrieve_image_text_pair
+  - retrieve_context_around_image
+  - expand_temporal_neighbors
+  - inspect_raw_image
+  - verify_evidence_sufficiency
+  - fallback_to_multimodal_rag
+  - abstain_if_no_evidence

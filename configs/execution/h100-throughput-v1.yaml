@@ -1,0 +1,20 @@
+execution_protocol: pmmc-throughput-v1
+schedule: model-stage-major-v1
+unit_preparation:
+  workers: 8
+  max_tasks_per_child: 16
+  cache_policy: read_write
+  counter_backend: qwen-vl-cached-exact-v1
+  local_asset_cache: true
+qbank:
+  text_query_batch_size: 32
+  multimodal_query_batch_size: 8
+  embedding_concurrency: 4
+  score_concurrency: 8
+checkpoint:
+  policy: milestone
+  interval_seconds: 1800
+  completed_jobs_interval: 250
+  retain_count: 2
+progress:
+  protocol: weighted-hierarchical-progress-v2

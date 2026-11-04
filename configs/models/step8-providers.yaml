@@ -1,0 +1,116 @@
+# Standalone registry template, not a replacement overlay for existing aliases.
+# Qwen revisions must be locked. GPT-6 Luna exposes a provider ID, not immutable weights.
+registry_version: pmmc-model-registry-v1
+models:
+  - &qwen9
+    alias: answer-qwen3.5-9b
+    endpoint_kind: litellm_openai
+    provider_model: Qwen/Qwen3.5-9B
+    expected_actual_model_id: Qwen/Qwen3.5-9B
+    source_repo_id: Qwen/Qwen3.5-9B
+    model_revision: pinned-on-server
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: Qwen/Qwen3.5-9B
+    tokenizer_revision: pinned-on-server
+    processor_name: Qwen/Qwen3.5-9B
+    processor_revision: pinned-on-server
+    provider_config: {kind: qwen_vllm, reasoning_mode: "off", max_output_tokens: 4096}
+  - <<: *qwen9
+    alias: answer-qwen3.5-27b
+    provider_model: Qwen/Qwen3.5-27B
+    expected_actual_model_id: Qwen/Qwen3.5-27B
+    source_repo_id: Qwen/Qwen3.5-27B
+    tokenizer_name: Qwen/Qwen3.5-27B
+    processor_name: Qwen/Qwen3.5-27B
+  - alias: answer-gpt-6-luna
+    endpoint_kind: litellm_openai
+    provider_model: gpt-6-luna
+    expected_actual_model_id: gpt-6-luna
+    model_revision: gpt-6-luna
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 1050000
+    tokenizer_name: provider-managed
+    tokenizer_revision: gpt-6-luna
+    provider_config: {kind: openai, reasoning_mode: low, max_output_tokens: 4096}
+    metadata:
+      identity_policy: exact-provider-id-not-immutable-weights
+      immutable_snapshot_available: false
+      api: responses
+      service_tier: default
+      shared_experiment_context_tokens: 32768
+      reviewed_on: "2026-09-30"
+  - alias: answer-claude-haiku-5.5
+    endpoint_kind: litellm_openai
+    provider_model: claude-haiku-5-5
+    expected_actual_model_id: claude-haiku-5-5
+    model_revision: claude-haiku-5-5
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 1000000
+    tokenizer_name: provider-managed
+    tokenizer_revision: claude-haiku-5-5
+    provider_config: {kind: anthropic, reasoning_mode: "off", max_output_tokens: 4096}
+    metadata:
+      identity_policy: exact-fixed-provider-id
+      api: messages
+      service_tier: standard_only
+      effort: low
+      sampling_policy: omit-provider-defaults-audited
+      shared_experiment_context_tokens: 32768
+      reviewed_on: "2026-10-07"
+  - <<: *qwen9
+    alias: compiler-qwen3.5-9b
+    provider_config: {kind: qwen_vllm, reasoning_mode: "off", max_output_tokens: 16384}
+  - <<: *qwen9
+    alias: reranker-qwen3.5-9b
+  - <<: *qwen9
+    alias: grounding-qwen3.5-9b
+  - <<: *qwen9
+    alias: judge-qwen3.5-9b
+  - alias: qwen3-embedding-8b
+    endpoint_kind: vllm_openai
+    provider_model: Qwen/Qwen3-Embedding-8B
+    expected_actual_model_id: Qwen/Qwen3-Embedding-8B
+    source_repo_id: Qwen/Qwen3-Embedding-8B
+    model_revision: pinned-on-server
+    capabilities: [embed_text]
+    tokenizer_name: Qwen/Qwen3-Embedding-8B
+    tokenizer_revision: pinned-on-server
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: qwen3-vl-embedding-8b
+    endpoint_kind: vllm_v2_embed
+    provider_model: Qwen/Qwen3-VL-Embedding-8B
+    expected_actual_model_id: Qwen/Qwen3-VL-Embedding-8B
+    source_repo_id: Qwen/Qwen3-VL-Embedding-8B
+    model_revision: pinned-on-server
+    capabilities: [embed_text, embed_image, embed_multimodal]
+    tokenizer_name: Qwen/Qwen3-VL-Embedding-8B
+    tokenizer_revision: pinned-on-server
+    processor_name: Qwen/Qwen3-VL-Embedding-8B
+    processor_revision: pinned-on-server
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: siglip2-so400m-patch14-384
+    endpoint_kind: pmmc_contrastive
+    provider_model: google/siglip2-so400m-patch14-384
+    expected_actual_model_id: google/siglip2-so400m-patch14-384
+    source_repo_id: google/siglip2-so400m-patch14-384
+    model_revision: pinned-on-server
+    capabilities: [embed_text, embed_image]
+    tokenizer_name: google/siglip2-so400m-patch14-384
+    tokenizer_revision: pinned-on-server
+    processor_name: google/siglip2-so400m-patch14-384
+    processor_revision: pinned-on-server
+    embedding_dimension: 1152
+    normalize_embeddings: true
+    distance_metric: cosine
+    metadata:
+      text_lowercase: true
+      text_max_length: 64
+      image_size: 384
+metadata:
+  purpose: step8-provider-registry
+  public_answer_payload_max_tokens: 512

@@ -1,0 +1,19 @@
+protocol_version: baseline-evaluation-v1
+normalizer_version: answer-normalizer-v1
+evidence_policy_version: evidence-resolution-v1
+bad_case_rule_version: bad-case-rules-v1
+judge_prompt_version: baseline-judge-v1
+judge_rubric_version: baseline-judge-rubric-v1
+judge_prompt_path: prompts/evaluation/baseline_judge_v1.txt
+judge_model_alias: judge-qwen3.5-9b
+judge_repeat_count: 1
+judge_score_values: [0.0, 0.5, 1.0]
+secondary_judge_enabled: false
+temperature: 0.0
+top_p: 1.0
+seed: 0
+max_output_tokens: 512
+retrieval_ks: [1, 5, 10, 20, 50]
+concurrency: 8
+job_max_attempts: 2
+job_retry_delay_seconds: 5.0

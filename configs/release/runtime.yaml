@@ -1,0 +1,479 @@
+profile_version: pmmc-runtime-profile-v1
+profile_name: h100-step8-exploration
+hardware_class: nvidia-h100-80gb
+model_lock_path: configs/release/models.lock.json
+weight_safety_factor: 1.1
+gpu_reserve_fraction: 0.1
+gpu_reserve_min_gib: 4.0
+service_overhead_gib: 4.0
+gpu_memory_utilization_max: 0.9
+telemetry_interval_seconds: 2.0
+shutdown_timeout_seconds: 60
+require_calibration_in_paper: true
+enable_litellm: false
+litellm_port: 4000
+stage_order:
+- gateway_smoke
+- embedding_text
+- embedding_contrastive
+- embedding_multimodal
+- compiler
+- answer_9b
+- answer_27b
+- grounding
+- judge
+services:
+- service_id: qwen35-9b-shared-chat
+  role: compiler
+  backend: vllm_chat
+  model_alias: compiler-qwen3.5-9b
+  stages:
+  - gateway_smoke
+  - compiler
+  - answer_9b
+  - grounding
+  - judge
+  dtype: bfloat16
+  max_model_len: 32768
+  max_num_seqs: 8
+  tensor_parallel_candidates:
+  - 1
+  gpu_memory_utilization: 0.9
+  startup_timeout_seconds: 1200
+  port: 8101
+  metadata:
+    served_roles:
+    - judge
+    - reranker
+    logical_roles:
+    - compiler
+    - reranker
+    - answer
+    - grounding
+    - judge
+    served_aliases:
+    - answer-qwen3.5-9b
+    - judge-qwen3.5-9b
+    - reranker-qwen3.5-9b
+    - grounding-qwen3.5-9b
+    physical_weight_identity: Qwen/Qwen3.5-9B
+    supports_thinking_control: true
+    resource_class: gpu_9b
+    calibration_required: true
+    frozen_replica_topology:
+      tensor_parallel_size: 1
+      replica_count: 8
+    calibrated_placement_options:
+    - tensor_parallel_size: 1
+      replica_count: 8
+- service_id: qwen35-27b-answer
+  role: answer
+  backend: vllm_chat
+  model_alias: answer-qwen3.5-27b
+  stages:
+  - answer_27b
+  dtype: bfloat16
+  max_model_len: 32768
+  max_num_seqs: 4
+  tensor_parallel_candidates:
+  - 2
+  gpu_memory_utilization: 0.9
+  startup_timeout_seconds: 1800
+  port: 8201
+  metadata:
+    physical_weight_identity: Qwen/Qwen3.5-27B
+    supports_thinking_control: true
+    resource_class: gpu_27b
+    calibration_required: true
+    frozen_replica_topology:
+      tensor_parallel_size: 2
+      replica_count: 4
+    requires_capacity_receipt: true
+    capacity_receipt_filename: step8-exploration-27b-native-capacity.json
+    calibrated_placement_options:
+    - tensor_parallel_size: 2
+      replica_count: 4
+    - tensor_parallel_size: 1
+      replica_count: 8
+    capacity_image_workload:
+      context_audit_hash: 31c2508a105577df07a0f3a25be10d7461b553f826457fa32fb5973b80e6cd41
+      image_height: 4032
+      image_width: 3154
+      images_per_sequence: 29
+      layouts:
+      - images:
+        - height: 315
+          image_tokens: 150
+          width: 474
+        - height: 338
+          image_tokens: 165
+          width: 473
+        - height: 1704
+          image_tokens: 3763
+          width: 2272
+        - height: 237
+          image_tokens: 91
+          width: 423
+        - height: 360
+          image_tokens: 132
+          width: 398
+        - height: 592
+          image_tokens: 216
+          width: 372
+        - height: 394
+          image_tokens: 360
+          width: 962
+        - height: 440
+          image_tokens: 196
+          width: 450
+        - height: 372
+          image_tokens: 144
+          width: 372
+        - height: 386
+          image_tokens: 144
+          width: 386
+        - height: 398
+          image_tokens: 144
+          width: 398
+        - height: 500
+          image_tokens: 336
+          width: 671
+        - height: 500
+          image_tokens: 304
+          width: 601
+        - height: 501
+          image_tokens: 368
+          width: 733
+        - height: 500
+          image_tokens: 336
+          width: 667
+        - height: 501
+          image_tokens: 304
+          width: 621
+        - height: 500
+          image_tokens: 272
+          width: 552
+        - height: 500
+          image_tokens: 336
+          width: 667
+        - height: 500
+          image_tokens: 304
+          width: 621
+        - height: 500
+          image_tokens: 352
+          width: 707
+        - height: 500
+          image_tokens: 160
+          width: 334
+        - height: 500
+          image_tokens: 160
+          width: 334
+        - height: 300
+          image_tokens: 81
+          width: 300
+        - height: 375
+          image_tokens: 192
+          width: 500
+        - height: 420
+          image_tokens: 208
+          width: 500
+        - height: 333
+          image_tokens: 160
+          width: 500
+        - height: 500
+          image_tokens: 160
+          width: 334
+        - height: 333
+          image_tokens: 160
+          width: 500
+        - height: 544
+          image_tokens: 272
+          width: 500
+      - images:
+        - height: 1281
+          image_tokens: 3560
+          width: 2846
+        - height: 255
+          image_tokens: 120
+          width: 474
+        - height: 659
+          image_tokens: 777
+          width: 1172
+        - height: 301
+          image_tokens: 135
+          width: 473
+        - height: 237
+          image_tokens: 98
+          width: 442
+        - height: 380
+          image_tokens: 144
+          width: 380
+        - height: 316
+          image_tokens: 140
+          width: 438
+        - height: 3966
+          image_tokens: 12276
+          width: 3154
+        - height: 675
+          image_tokens: 798
+          width: 1200
+        - height: 316
+          image_tokens: 120
+          width: 397
+        - height: 315
+          image_tokens: 150
+          width: 474
+        - height: 1024
+          image_tokens: 1024
+          width: 1024
+      - images:
+        - height: 4032
+          image_tokens: 11844
+          width: 3024
+        - height: 501
+          image_tokens: 272
+          width: 529
+        - height: 533
+          image_tokens: 272
+          width: 501
+        - height: 500
+          image_tokens: 336
+          width: 667
+        - height: 667
+          image_tokens: 336
+          width: 500
+        - height: 500
+          image_tokens: 336
+          width: 669
+        - height: 667
+          image_tokens: 336
+          width: 500
+        - height: 400
+          image_tokens: 192
+          width: 500
+        - height: 312
+          image_tokens: 160
+          width: 500
+        - height: 351
+          image_tokens: 176
+          width: 500
+        - height: 357
+          image_tokens: 176
+          width: 500
+        - height: 500
+          image_tokens: 256
+          width: 499
+        - height: 512
+          image_tokens: 336
+          width: 683
+        - height: 512
+          image_tokens: 464
+          width: 933
+        - height: 500
+          image_tokens: 384
+          width: 752
+        - height: 500
+          image_tokens: 384
+          width: 752
+        - height: 500
+          image_tokens: 320
+          width: 650
+        - height: 659
+          image_tokens: 336
+          width: 500
+        - height: 500
+          image_tokens: 352
+          width: 704
+        - height: 362
+          image_tokens: 176
+          width: 500
+        - height: 357
+          image_tokens: 176
+          width: 500
+        - height: 333
+          image_tokens: 160
+          width: 500
+        - height: 500
+          image_tokens: 160
+          width: 333
+      - images:
+        - height: 656
+          image_tokens: 640
+          width: 1024
+        - height: 280
+          image_tokens: 126
+          width: 462
+        - height: 452
+          image_tokens: 196
+          width: 452
+        - height: 480
+          image_tokens: 225
+          width: 480
+        - height: 683
+          image_tokens: 672
+          width: 1024
+        - height: 480
+          image_tokens: 180
+          width: 384
+        - height: 300
+          image_tokens: 81
+          width: 300
+        - height: 359
+          image_tokens: 154
+          width: 450
+        - height: 280
+          image_tokens: 108
+          width: 390
+        - height: 1024
+          image_tokens: 1024
+          width: 1024
+        - height: 280
+          image_tokens: 108
+          width: 390
+        - height: 280
+          image_tokens: 108
+          width: 390
+        - height: 267
+          image_tokens: 96
+          width: 400
+        - height: 362
+          image_tokens: 99
+          width: 300
+        - height: 450
+          image_tokens: 126
+          width: 300
+        - height: 270
+          image_tokens: 120
+          width: 480
+      - images:
+        - height: 1536
+          image_tokens: 3072
+          width: 2048
+        - height: 375
+          image_tokens: 192
+          width: 500
+        - height: 435
+          image_tokens: 224
+          width: 500
+        - height: 500
+          image_tokens: 176
+          width: 357
+        - height: 270
+          image_tokens: 64
+          width: 247
+        - height: 456
+          image_tokens: 224
+          width: 500
+        - height: 375
+          image_tokens: 192
+          width: 500
+        - height: 333
+          image_tokens: 160
+          width: 500
+        - height: 1768
+          image_tokens: 4455
+          width: 2596
+        - height: 427
+          image_tokens: 260
+          width: 640
+        - height: 424
+          image_tokens: 260
+          width: 640
+        - height: 427
+          image_tokens: 260
+          width: 640
+        - height: 472
+          image_tokens: 300
+          width: 640
+        - height: 423
+          image_tokens: 260
+          width: 640
+        - height: 300
+          image_tokens: 81
+          width: 300
+        - height: 300
+          image_tokens: 81
+          width: 300
+        - height: 296
+          image_tokens: 81
+          width: 300
+        - height: 301
+          image_tokens: 70
+          width: 205
+        - height: 300
+          image_tokens: 70
+          width: 209
+        - height: 300
+          image_tokens: 80
+          width: 236
+        - height: 300
+          image_tokens: 80
+          width: 236
+        - height: 333
+          image_tokens: 160
+          width: 500
+      processor_config_sha256: 27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516
+      protocol: native-image-layouts-v1
+  extra_args:
+  - --limit-mm-per-prompt
+  - '{"image": 29}'
+  - --mm-processor-kwargs
+  - '{}'
+  - --no-enable-prefix-caching
+- service_id: text-embedding-qwen3
+  role: text_embedding
+  backend: vllm_embedding
+  model_alias: qwen3-embedding-8b
+  stages:
+  - gateway_smoke
+  - embedding_text
+  dtype: bfloat16
+  max_model_len: 32768
+  max_num_seqs: 32
+  tensor_parallel_candidates:
+  - 1
+  gpu_memory_utilization: 0.9
+  startup_timeout_seconds: 1200
+  port: 8301
+- service_id: multimodal-embedding-qwen3vl
+  role: multimodal_embedding
+  backend: vllm_multimodal_embedding
+  model_alias: qwen3-vl-embedding-8b
+  stages:
+  - gateway_smoke
+  - embedding_multimodal
+  dtype: bfloat16
+  max_model_len: 32768
+  max_num_seqs: 8
+  tensor_parallel_candidates:
+  - 1
+  gpu_memory_utilization: 0.9
+  startup_timeout_seconds: 1200
+  port: 8401
+- service_id: contrastive-embedding-siglip2
+  role: contrastive_embedding
+  backend: transformers_contrastive
+  model_alias: siglip2-so400m-patch14-384
+  stages:
+  - gateway_smoke
+  - embedding_contrastive
+  dtype: bfloat16
+  max_model_len: 64
+  max_num_seqs: 32
+  tensor_parallel_candidates:
+  - 1
+  gpu_memory_utilization: 0.9
+  startup_timeout_seconds: 1200
+  port: 8501
+metadata:
+  placement_policy: exclusive_then_sequential
+  target_workload: pmmc_step8
+  binding_policy: exact_stage_and_model_alias
+  calibration_status: required_not_yet_measured
+  native_provider_resource_class: api
+  native_provider_offline_token_counting: step8-provider-context-budget-v1
+  campaign_services_in_gpu_pod: false
+  stage_replica_role:
+    answer_9b: compiler
+    grounding: compiler
+    answer_27b: answer

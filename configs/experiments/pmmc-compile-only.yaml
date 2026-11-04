@@ -1,0 +1,54 @@
+launcher_schema_version: 0.8.0
+experiment_name: pmmc-verified-qbank-compile-only
+target: pmmc
+mode: paper
+methods: []
+models:
+  answer_model: answer-qwen3.5-9b
+  judge_model: judge-qwen3.5-9b
+  text_embedding_model: qwen3-embedding-8b
+  contrastive_embedding_model: siglip2-so400m-patch14-384
+  multimodal_embedding_model: qwen3-vl-embedding-8b
+  compiler_model: compiler-qwen3.5-9b
+selection:
+  datasets: [memlens, memgallery]
+  question_types: []
+  source_categories: []
+  scenario_ids: []
+  query_ids: []
+  seed: 0
+  shard_count: 1
+  shard_index: 0
+  include_excluded: false
+infrastructure:
+  mode: self_contained
+  wait_timeout_seconds: 300
+  migrate_database: true
+  sync_assets: true
+  archive_snapshot: false
+  archive_referenced_model_artifacts: true
+progress:
+  report_interval_seconds: 30
+runtime_profile_path: configs/runtime/h100-paper.yaml
+execution_profile_path: configs/execution/h100-replicated-8gpu-step6d-v1.yaml
+questioner_config_path: configs/compiler/questioner-v3.3.yaml
+planner_config_path: configs/compiler/planner-v1.2.yaml
+doubter_config_path: configs/compiler/doubter-v1.yaml
+compiler_foundation_config_path: configs/compiler/pmmc-v4.yaml
+questioner_freeze_manifest_path: outputs/freezes/questioner-v3.3-freeze.json
+model_registry_path: configs/models/paper.yaml
+model_registry_overlays: []
+download_policy: auto
+model_verification_policy: cached_receipt
+calibration_policy: auto
+evaluate: false
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+embedding_batch_size: 64
+multimodal_embedding_batch_size: 16
+model_concurrency: 64
+metadata:
+  execution_mode: compile_only
+  paper_result: false
+  active_round: 2
+  max_round: 3

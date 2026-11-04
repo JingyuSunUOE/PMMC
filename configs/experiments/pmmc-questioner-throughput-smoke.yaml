@@ -1,0 +1,50 @@
+launcher_schema_version: 0.3.0
+experiment_name: pmmc-questioner-throughput-smoke
+target: pmmc_questioner
+mode: dev
+methods: []
+models:
+  answer_model: answer-qwen3.5-9b
+  judge_model: judge-qwen3.5-9b
+  text_embedding_model: qwen3-embedding-8b
+  contrastive_embedding_model: siglip2-so400m-patch14-384
+  multimodal_embedding_model: qwen3-vl-embedding-8b
+  compiler_model: compiler-qwen3.5-9b
+selection:
+  datasets: [memlens, memgallery]
+  question_types: []
+  source_categories: []
+  scenario_ids: []
+  query_ids: []
+  limit: 2
+  seed: 0
+  shard_count: 1
+  shard_index: 0
+  include_excluded: false
+infrastructure:
+  mode: self_contained
+  wait_timeout_seconds: 300
+  migrate_database: true
+  sync_assets: true
+  archive_snapshot: false
+  archive_referenced_model_artifacts: true
+progress:
+  report_interval_seconds: 10
+runtime_profile_path: configs/runtime/h100-dev.yaml
+execution_profile_path: configs/execution/h100-throughput-v1.yaml
+questioner_config_path: configs/compiler/questioner-v2.yaml
+model_registry_path: configs/models/paper.yaml
+model_registry_overlays: []
+download_policy: never
+model_verification_policy: identity_only
+calibration_policy: skip
+evaluate: true
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+embedding_batch_size: 32
+multimodal_embedding_batch_size: 8
+model_concurrency: 4
+metadata:
+  paper_result: false
+  producer_stage: questions
+  smoke_fixture: true

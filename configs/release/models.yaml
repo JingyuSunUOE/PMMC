@@ -1,0 +1,208 @@
+registry_version: pmmc-model-registry-v1
+models:
+- alias: answer-qwen3.5-9b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-9B
+  expected_actual_model_id: Qwen/Qwen3.5-9B
+  source_repo_id: Qwen/Qwen3.5-9B
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-9B
+  tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  processor_name: Qwen/Qwen3.5-9B
+  processor_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+- alias: answer-qwen3.5-27b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-27B
+  expected_actual_model_id: Qwen/Qwen3.5-27B
+  source_repo_id: Qwen/Qwen3.5-27B
+  model_revision: fc05daec18b0a78c049392ed2e771dde82bdf654
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-27B
+  tokenizer_revision: fc05daec18b0a78c049392ed2e771dde82bdf654
+  processor_name: Qwen/Qwen3.5-27B
+  processor_revision: fc05daec18b0a78c049392ed2e771dde82bdf654
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+- alias: answer-gpt-6-luna
+  endpoint_kind: litellm_openai
+  provider_model: gpt-6-luna
+  expected_actual_model_id: gpt-6-luna
+  model_revision: gpt-6-luna
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 1050000
+  tokenizer_name: provider-managed
+  tokenizer_revision: gpt-6-luna
+  provider_config:
+    kind: openai
+    reasoning_mode: low
+    max_output_tokens: 4096
+  metadata:
+    identity_policy: exact-provider-id-not-immutable-weights
+    immutable_snapshot_available: false
+    api: responses
+    service_tier: default
+    shared_experiment_context_tokens: 32768
+    reviewed_on: '2026-09-30'
+- alias: answer-claude-haiku-5.5
+  endpoint_kind: litellm_openai
+  provider_model: claude-haiku-5-5
+  expected_actual_model_id: claude-haiku-5-5
+  model_revision: claude-haiku-5-5
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 1000000
+  tokenizer_name: provider-managed
+  tokenizer_revision: claude-haiku-5-5
+  provider_config:
+    kind: anthropic
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+  metadata:
+    identity_policy: exact-fixed-provider-id
+    api: messages
+    service_tier: standard_only
+    effort: low
+    sampling_policy: omit-provider-defaults-audited
+    shared_experiment_context_tokens: 32768
+    reviewed_on: '2026-10-07'
+- alias: compiler-qwen3.5-9b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-9B
+  expected_actual_model_id: Qwen/Qwen3.5-9B
+  source_repo_id: Qwen/Qwen3.5-9B
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-9B
+  tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  processor_name: Qwen/Qwen3.5-9B
+  processor_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 16384
+- alias: reranker-qwen3.5-9b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-9B
+  expected_actual_model_id: Qwen/Qwen3.5-9B
+  source_repo_id: Qwen/Qwen3.5-9B
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-9B
+  tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  processor_name: Qwen/Qwen3.5-9B
+  processor_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+- alias: grounding-qwen3.5-9b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-9B
+  expected_actual_model_id: Qwen/Qwen3.5-9B
+  source_repo_id: Qwen/Qwen3.5-9B
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-9B
+  tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  processor_name: Qwen/Qwen3.5-9B
+  processor_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+- alias: judge-qwen3.5-9b
+  endpoint_kind: litellm_openai
+  provider_model: Qwen/Qwen3.5-9B
+  expected_actual_model_id: Qwen/Qwen3.5-9B
+  source_repo_id: Qwen/Qwen3.5-9B
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  capabilities:
+  - chat_text
+  - chat_multimodal
+  context_window: 32768
+  tokenizer_name: Qwen/Qwen3.5-9B
+  tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  processor_name: Qwen/Qwen3.5-9B
+  processor_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  provider_config:
+    kind: qwen_vllm
+    reasoning_mode: 'off'
+    max_output_tokens: 4096
+- alias: qwen3-embedding-8b
+  endpoint_kind: vllm_openai
+  provider_model: Qwen/Qwen3-Embedding-8B
+  expected_actual_model_id: Qwen/Qwen3-Embedding-8B
+  source_repo_id: Qwen/Qwen3-Embedding-8B
+  model_revision: 1d8ad4ca9b3dd8059ad90a75d4983776a23d44af
+  capabilities:
+  - embed_text
+  tokenizer_name: Qwen/Qwen3-Embedding-8B
+  tokenizer_revision: 1d8ad4ca9b3dd8059ad90a75d4983776a23d44af
+  embedding_dimension: 4096
+  normalize_embeddings: true
+  distance_metric: cosine
+- alias: qwen3-vl-embedding-8b
+  endpoint_kind: vllm_v2_embed
+  provider_model: Qwen/Qwen3-VL-Embedding-8B
+  expected_actual_model_id: Qwen/Qwen3-VL-Embedding-8B
+  source_repo_id: Qwen/Qwen3-VL-Embedding-8B
+  model_revision: 2c4565515e0f265c6511776e7193b22c0968ddc7
+  capabilities:
+  - embed_text
+  - embed_image
+  - embed_multimodal
+  tokenizer_name: Qwen/Qwen3-VL-Embedding-8B
+  tokenizer_revision: 2c4565515e0f265c6511776e7193b22c0968ddc7
+  processor_name: Qwen/Qwen3-VL-Embedding-8B
+  processor_revision: 2c4565515e0f265c6511776e7193b22c0968ddc7
+  embedding_dimension: 4096
+  normalize_embeddings: true
+  distance_metric: cosine
+- alias: siglip2-so400m-patch14-384
+  endpoint_kind: pmmc_contrastive
+  provider_model: google/siglip2-so400m-patch14-384
+  expected_actual_model_id: google/siglip2-so400m-patch14-384
+  source_repo_id: google/siglip2-so400m-patch14-384
+  model_revision: e8e487298228002f3d8a82e0cd5c8ea9c567f57f
+  capabilities:
+  - embed_text
+  - embed_image
+  tokenizer_name: google/siglip2-so400m-patch14-384
+  tokenizer_revision: e8e487298228002f3d8a82e0cd5c8ea9c567f57f
+  processor_name: google/siglip2-so400m-patch14-384
+  processor_revision: e8e487298228002f3d8a82e0cd5c8ea9c567f57f
+  embedding_dimension: 1152
+  normalize_embeddings: true
+  distance_metric: cosine
+  metadata:
+    text_lowercase: true
+    text_max_length: 64
+    image_size: 384
+metadata:
+  purpose: step8-provider-registry
+  public_answer_payload_max_tokens: 512

@@ -1,0 +1,48 @@
+protocol_version: pmmc-questioner-v3.6
+prompt_version: pmmc-questioner-v3.6
+renderer_version: questioner-safe-alias-renderer-v3.6
+parser_version: questioner-json-parser-v3.6
+unit_builder_version: session-opportunity-candidate-set-v7
+dataset_unit_builders:
+  memgallery: round-opportunity-candidate-set-v7
+round_block_size: 4
+round_block_stride: 4
+gate_version: questioner-static-semantic-gate-v3.6
+dedupe_version: questioner-information-need-dedupe-v3
+family_dedupe_version: qbank-family-dedupe-v5
+matcher_version: qbank-hybrid-rrf-v1
+coverage_protocol_version: qbank-coverage-v7
+compiler_model_alias: compiler-qwen3.5-9b
+text_embedding_model_alias: qwen3-embedding-8b
+multimodal_embedding_model_alias: qwen3-vl-embedding-8b
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+max_images_per_unit: 8
+question_budget_max: 8
+control_budget_max: 1
+max_paraphrases: 0
+memory_raw_image_policy: allow
+job_max_attempts: 2
+text_embedding_batch_size: 64
+multimodal_embedding_batch_size: 16
+embedding_concurrency: 32
+rrf_constant: 60
+per_channel_top_k: 50
+question_budgets: [1, 2, 4, 8]
+match_ks: [1, 3, 5, 10, 20, 50]
+relation_order:
+  - adjacent_session
+  - shared_entity
+  - shared_image
+  - profile_preference
+  - temporal_neighbor
+gate_mode: report_only
+scientific_thresholds: {}
+opportunity_builder_version: questioner-opportunity-builder-v7
+verifier_prompt_version: pmmc-questioner-verifier-v7
+verifier_schema_version: questioner-verifier-schema-v7
+max_opportunities_per_unit: 24
+fts_lexeme_limit: 12
+fts_relation_top_k: 8
+relation_selector_version: postgres-simple-fts-validated-v5
+semantic_revision_max: 0

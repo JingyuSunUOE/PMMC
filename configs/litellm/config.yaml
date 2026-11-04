@@ -1,0 +1,15 @@
+model_list:
+  - model_name: answer-qwen3.5-9b
+    litellm_params:
+      model: openai/Qwen/Qwen3.5-9B
+      api_base: os.environ/VLLM_CHAT_BASE_URL
+      api_key: os.environ/VLLM_API_KEY
+
+router_settings:
+  num_retries: 0
+  fallbacks: []
+  enable_pre_call_checks: true
+
+general_settings:
+  master_key: os.environ/LITELLM_API_KEY
+  disable_spend_logs: false

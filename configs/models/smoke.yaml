@@ -1,0 +1,79 @@
+registry_version: pmmc-model-registry-smoke-v1
+models:
+  - alias: answer-qwen3.5-9b
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+  - alias: qwen3-embedding-8b
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [embed_text]
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: siglip2-so400m-patch14-384
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [embed_text, embed_image]
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+    embedding_dimension: 1152
+    normalize_embeddings: true
+    distance_metric: cosine
+    metadata:
+      text_lowercase: true
+      text_max_length: 64
+      image_size: 384
+  - alias: qwen3-vl-embedding-8b
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [embed_text, embed_image, embed_multimodal]
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: judge-qwen3.5-9b
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 8192
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+  - alias: reranker-qwen3.5-9b
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: pmmc/fake-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+metadata:
+  mode: step5d_smoke_fixture
+  paper_result: false

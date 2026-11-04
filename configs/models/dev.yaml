@@ -1,0 +1,110 @@
+registry_version: pmmc-model-registry-v1
+models:
+  - alias: answer-qwen3.5-9b
+    endpoint_kind: litellm_openai
+    provider_model: answer-qwen3.5-9b
+    expected_actual_model_id: Qwen/Qwen3.5-9B
+    source_repo_id: Qwen/Qwen3.5-9B
+    model_revision: main
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: Qwen/Qwen3.5-9B
+    tokenizer_revision: main
+    processor_name: Qwen/Qwen3.5-9B
+    processor_revision: main
+  - alias: compiler-qwen3.5-9b
+    endpoint_kind: litellm_openai
+    provider_model: compiler-qwen3.5-9b
+    expected_actual_model_id: Qwen/Qwen3.5-9B
+    source_repo_id: Qwen/Qwen3.5-9B
+    model_revision: main
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: Qwen/Qwen3.5-9B
+    tokenizer_revision: main
+    processor_name: Qwen/Qwen3.5-9B
+    processor_revision: main
+  - alias: qwen3-embedding-8b
+    endpoint_kind: vllm_openai
+    provider_model: Qwen/Qwen3-Embedding-8B
+    expected_actual_model_id: Qwen/Qwen3-Embedding-8B
+    source_repo_id: Qwen/Qwen3-Embedding-8B
+    model_revision: main
+    capabilities: [embed_text]
+    tokenizer_name: Qwen/Qwen3-Embedding-8B
+    tokenizer_revision: main
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: qwen3-vl-embedding-8b
+    endpoint_kind: vllm_v2_embed
+    provider_model: Qwen/Qwen3-VL-Embedding-8B
+    expected_actual_model_id: Qwen/Qwen3-VL-Embedding-8B
+    source_repo_id: Qwen/Qwen3-VL-Embedding-8B
+    model_revision: main
+    capabilities: [embed_text, embed_image, embed_multimodal]
+    tokenizer_name: Qwen/Qwen3-VL-Embedding-8B
+    tokenizer_revision: main
+    processor_name: Qwen/Qwen3-VL-Embedding-8B
+    processor_revision: main
+    embedding_dimension: 4096
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: siglip2-so400m-patch14-384
+    endpoint_kind: pmmc_contrastive
+    provider_model: google/siglip2-so400m-patch14-384
+    expected_actual_model_id: google/siglip2-so400m-patch14-384
+    source_repo_id: google/siglip2-so400m-patch14-384
+    model_revision: main
+    capabilities: [embed_text, embed_image]
+    tokenizer_name: google/siglip2-so400m-patch14-384
+    tokenizer_revision: main
+    processor_name: google/siglip2-so400m-patch14-384
+    processor_revision: main
+    embedding_dimension: 1152
+    normalize_embeddings: true
+    distance_metric: cosine
+    metadata:
+      text_lowercase: true
+      text_max_length: 64
+      image_size: 384
+  - alias: judge-qwen3.5-9b
+    endpoint_kind: litellm_openai
+    provider_model: judge-qwen3.5-9b
+    expected_actual_model_id: Qwen/Qwen3.5-9B
+    source_repo_id: Qwen/Qwen3.5-9B
+    model_revision: main
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 8192
+    tokenizer_name: Qwen/Qwen3.5-9B
+    tokenizer_revision: main
+    processor_name: Qwen/Qwen3.5-9B
+    processor_revision: main
+  - alias: deterministic-fake
+    endpoint_kind: fake
+    provider_model: deterministic-fake
+    expected_actual_model_id: deterministic-fake@v1
+    model_revision: v1
+    capabilities: [chat_text, chat_multimodal, embed_text, embed_image, embed_multimodal]
+    context_window: 32768
+    tokenizer_name: pmmc/whitespace-tokenizer
+    tokenizer_revision: v1
+    processor_name: pmmc/fake-processor
+    processor_revision: v1
+    embedding_dimension: 16
+    normalize_embeddings: true
+    distance_metric: cosine
+  - alias: reranker-qwen3.5-9b
+    endpoint_kind: litellm_openai
+    provider_model: reranker-qwen3.5-9b
+    expected_actual_model_id: Qwen/Qwen3.5-9B
+    source_repo_id: Qwen/Qwen3.5-9B
+    model_revision: main
+    capabilities: [chat_text, chat_multimodal]
+    context_window: 32768
+    tokenizer_name: Qwen/Qwen3.5-9B
+    tokenizer_revision: main
+    processor_name: Qwen/Qwen3.5-9B
+    processor_revision: main
+metadata:
+  mode: dev

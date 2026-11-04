@@ -1,0 +1,60 @@
+profile_version: pmmc-runtime-profile-v1
+profile_name: h100-dev
+hardware_class: nvidia-h100-80gb
+model_lock_path: artifacts/models/dev.lock.json
+stage_order: [gateway_smoke, embedding_text, embedding_contrastive, embedding_multimodal, compiler, answer, judge]
+services:
+  - service_id: answer-qwen35
+    role: answer
+    backend: vllm_chat
+    model_alias: answer-qwen3.5-9b
+    stages: [gateway_smoke, answer]
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    port: 8101
+  - service_id: text-embedding-qwen3
+    role: text_embedding
+    backend: vllm_embedding
+    model_alias: qwen3-embedding-8b
+    stages: [gateway_smoke, embedding_text]
+    max_model_len: 32768
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1, 2]
+    port: 8102
+  - service_id: multimodal-embedding-qwen3vl
+    role: multimodal_embedding
+    backend: vllm_multimodal_embedding
+    model_alias: qwen3-vl-embedding-8b
+    stages: [gateway_smoke, embedding_multimodal]
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    port: 8103
+  - service_id: contrastive-embedding-siglip2
+    role: contrastive_embedding
+    backend: transformers_contrastive
+    model_alias: siglip2-so400m-patch14-384
+    stages: [gateway_smoke, embedding_contrastive]
+    max_model_len: 64
+    max_num_seqs: 32
+    tensor_parallel_candidates: [1]
+    port: 8104
+  - service_id: judge-qwen35
+    role: judge
+    backend: vllm_chat
+    model_alias: judge-qwen3.5-9b
+    stages: [judge]
+    max_model_len: 8192
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    port: 8105
+  - service_id: compiler-qwen35
+    role: compiler
+    backend: vllm_chat
+    model_alias: compiler-qwen3.5-9b
+    stages: [compiler]
+    max_model_len: 32768
+    max_num_seqs: 8
+    tensor_parallel_candidates: [1, 2]
+    port: 8106

@@ -1,0 +1,10 @@
+# CPU cache preparation only. prepare_exploration supplies the real data paths.
+schema_version: "0.1.0"
+protocol_name: step8-exploration
+model_registry: configs/release/models.yaml
+model_lock: configs/release/models.lock.json
+runtime_profile: configs/release/runtime.yaml
+partition_dir: outputs/step8/exploration/not-a-campaign/no-partition
+exposure_manifest: outputs/step8/exploration/not-a-campaign/no-exposure
+regression_manifest: configs/release/no-regression.json
+output_root: outputs/step8

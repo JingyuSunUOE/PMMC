@@ -1,0 +1,29 @@
+launcher_schema_version: 0.1.0
+experiment_name: pmmc-paper-reserved
+target: pmmc
+mode: paper
+methods:
+  - full_context_captions
+  - full_context_raw_images
+  - caption_text_rag
+  - contrastive_multimodal_rag
+  - native_multimodal_rag
+models:
+  answer_model: answer-qwen3.5-9b
+  judge_model: judge-qwen3.5-9b
+  text_embedding_model: qwen3-embedding-8b
+  contrastive_embedding_model: siglip2-so400m-patch14-384
+  multimodal_embedding_model: qwen3-vl-embedding-8b
+selection:
+  datasets: [memlens, memgallery]
+infrastructure:
+  mode: external
+progress:
+  report_interval_seconds: 30
+runtime_profile_path: configs/runtime/h100-paper.yaml
+download_policy: auto
+model_verification_policy: cached_receipt
+calibration_policy: auto
+evaluate: true
+metadata:
+  unavailable_reason: Doubter, final QBankDecision, and the online PMMC executor are not implemented yet

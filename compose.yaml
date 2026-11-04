@@ -1,0 +1,57 @@
+services:
+  postgres:
+    build:
+      context: ./docker/postgres
+    environment:
+      POSTGRES_DB: ${PMMC_POSTGRES_DB:-pmmc}
+      POSTGRES_USER: pmmc_owner
+      POSTGRES_PASSWORD: ${PMMC_POSTGRES_ADMIN_PASSWORD:?set PMMC_POSTGRES_ADMIN_PASSWORD}
+      PMMC_POSTGRES_RUNTIME_PASSWORD: ${PMMC_POSTGRES_RUNTIME_PASSWORD:?set PMMC_POSTGRES_RUNTIME_PASSWORD}
+      PMMC_POSTGRES_EVALUATOR_PASSWORD: ${PMMC_POSTGRES_EVALUATOR_PASSWORD:?set PMMC_POSTGRES_EVALUATOR_PASSWORD}
+    expose:
+      - "5432"
+    volumes:
+      - pmmc-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${PMMC_MINIO_ROOT_USER:?set PMMC_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${PMMC_MINIO_ROOT_PASSWORD:?set PMMC_MINIO_ROOT_PASSWORD}
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - pmmc-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    build:
+      context: ./docker/minio
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      PMMC_MINIO_ROOT_USER: ${PMMC_MINIO_ROOT_USER:?set PMMC_MINIO_ROOT_USER}
+      PMMC_MINIO_ROOT_PASSWORD: ${PMMC_MINIO_ROOT_PASSWORD:?set PMMC_MINIO_ROOT_PASSWORD}
+      PMMC_OBJECT_STORE_BUCKET: ${PMMC_OBJECT_STORE_BUCKET:-pmmc-runtime}
+      PMMC_OBJECT_STORE_EVALUATION_BUCKET: ${PMMC_OBJECT_STORE_EVALUATION_BUCKET:-pmmc-evaluation}
+      PMMC_OBJECT_STORE_ACCESS_KEY: ${PMMC_OBJECT_STORE_ACCESS_KEY:?set PMMC_OBJECT_STORE_ACCESS_KEY}
+      PMMC_OBJECT_STORE_SECRET_KEY: ${PMMC_OBJECT_STORE_SECRET_KEY:?set PMMC_OBJECT_STORE_SECRET_KEY}
+      PMMC_OBJECT_STORE_EVALUATOR_ACCESS_KEY: ${PMMC_OBJECT_STORE_EVALUATOR_ACCESS_KEY:?set PMMC_OBJECT_STORE_EVALUATOR_ACCESS_KEY}
+      PMMC_OBJECT_STORE_EVALUATOR_SECRET_KEY: ${PMMC_OBJECT_STORE_EVALUATOR_SECRET_KEY:?set PMMC_OBJECT_STORE_EVALUATOR_SECRET_KEY}
+    restart: "no"
+
+volumes:
+  pmmc-postgres-data:
+  pmmc-minio-data:

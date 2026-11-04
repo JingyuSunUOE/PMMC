@@ -1,0 +1,125 @@
+"""Versioned completion-function extension for Step8 method-scoped evaluation.
+
+The 0032 completion trigger remains installed. Bootstrap and the maintenance installer
+apply this same extension without rewriting historical Alembic migrations or
+component receipts. All original source, reference and completion guards remain.
+"""
+
+import hashlib
+
+VERSION = "step8-evaluation-method-scope-v2"
+FUNCTION = "pmmc_evaluation.enforce_step8_evaluation_completion()"
+_MARKER = "      -- " + VERSION + "\n"
+_OLD_MARKER = "      -- step8-evaluation-method-scope-v1\n"
+_OLD_SCOPE = """      IF COALESCE(evaluation.metadata->>'method_scope','all') NOT IN ('all','pmmc')
+         OR (evaluation.metadata ? 'method_scope' AND (
+              jsonb_typeof(evaluation.metadata->'method_scope') IS DISTINCT FROM 'string'
+              OR report->'method_scope' IS DISTINCT FROM evaluation.metadata->'method_scope'))
+         OR (NOT (evaluation.metadata ? 'method_scope') AND report ? 'method_scope')
+         OR (evaluation.metadata->>'method_scope'='pmmc'
+             AND report->'all_methods_evaluated' IS DISTINCT FROM 'false'::jsonb) THEN
+        RAISE EXCEPTION 'step8_evaluation_method_scope_invalid' USING ERRCODE='55000';
+      END IF;
+"""
+_SCOPE = _OLD_SCOPE.replace("('all','pmmc')", "('all','pmmc','pmmc_main','paired_main')").replace(
+    "evaluation.metadata->>'method_scope'='pmmc'",
+    "evaluation.metadata->>'method_scope' IN ('pmmc','pmmc_main','paired_main')",
+) + """      IF (COALESCE(evaluation.metadata->>'method_scope','all')='pmmc_main') != EXISTS (
+            SELECT 1 FROM pmmc_runtime.query_executor_runs r
+            WHERE r.query_executor_run_id=evaluation.legacy_source_run_id
+              AND r.metadata->>'readout'='exploration-primary-b8-r2')
+         OR (evaluation.metadata->>'method_scope'='pmmc_main' AND NOT EXISTS (
+            SELECT 1 FROM pmmc_runtime.query_executor_runs r
+            JOIN pmmc_runtime.benchmark_campaigns campaign
+              ON campaign.campaign_id=evaluation.metadata->>'campaign_id'
+            WHERE r.query_executor_run_id=evaluation.legacy_source_run_id
+              AND campaign.phase='exploration' AND r.metadata->>'treatment'='main'
+              AND r.metadata->'execute_full_grid'='false'::jsonb
+              AND r.metadata->'declared_cells'='[[8,2]]'::jsonb
+              AND r.metadata->>'expected_cell_count'='3'))
+         OR (evaluation.metadata->>'method_scope'='paired_main' AND NOT EXISTS (
+            SELECT 1 FROM pmmc_runtime.query_executor_runs r
+            JOIN pmmc_runtime.benchmark_campaigns campaign
+              ON campaign.campaign_id=evaluation.metadata->>'campaign_id'
+            WHERE r.query_executor_run_id=evaluation.legacy_source_run_id
+              AND campaign.phase='exploration' AND r.metadata->>'treatment'='main')) THEN
+        RAISE EXCEPTION 'step8_evaluation_primary_scope_invalid' USING ERRCODE='55000';
+      END IF;
+"""
+_OLD_FILTER = "AND (COALESCE(evaluation.metadata->>'method_scope','all')='all' OR c.method='pmmc')"
+_FILTER = """AND (COALESCE(evaluation.metadata->>'method_scope','all') IN ('all','paired_main') OR c.method='pmmc')
+        AND (COALESCE(evaluation.metadata->>'method_scope','all') NOT IN ('pmmc_main','paired_main')
+             OR (c.payload->>'treatment'='main'
+                 AND c.payload->>'source_variant'='active'
+                 AND c.payload->>'question_budget'='8' AND c.payload->>'round_id'='2'))"""
+_JUDGE = """AND (c.evaluation_run_id=NEW.evaluation_run_id OR EXISTS (
+                   SELECT 1 FROM pmmc_evaluation.evaluation_runs origin
+                    WHERE origin.evaluation_run_id=c.evaluation_run_id
+                      AND origin.protocol_version=evaluation.protocol_version
+                      AND origin.legacy_source_run_id=evaluation.legacy_source_run_id
+                      AND origin.judge_model_alias=evaluation.judge_model_alias
+                      AND origin.judge_prompt_hash=evaluation.judge_prompt_hash
+                      AND origin.judge_rubric_version=evaluation.judge_rubric_version
+                      AND NOT EXISTS (
+                        SELECT 1 FROM unnest(ARRAY['campaign_id','protocol_hash','query_hash',
+                          'gold_hash','snapshot_id','judge_config','judge_prompt_hash',
+                          'judge_model_hash','adapter_source_hash']) key
+                         WHERE origin.metadata->key IS NULL
+                            OR origin.metadata->key IS DISTINCT FROM evaluation.metadata->key)))"""
+
+
+def _changes(*, legacy=False):
+    marker, scope, cell_filter = (
+        (_OLD_MARKER, _OLD_SCOPE, _OLD_FILTER) if legacy else (_MARKER, _SCOPE, _FILTER)
+    )
+    return (
+        ("      SELECT count(*) INTO expected FROM pmmc_runtime.benchmark_cell_assignments a",
+         marker + scope
+         + "      SELECT count(*) INTO expected FROM pmmc_runtime.benchmark_cell_assignments a"),
+        ("AND c.answer_model=r.metadata->>'answer_model_alias'\n        AND ((",
+         "AND c.answer_model=r.metadata->>'answer_model_alias'\n        " + cell_filter
+         + "\n        AND (("),
+        ("AND c.dataset=r.dataset AND c.answer_model=r.metadata->>'answer_model_alias'"
+         "\n                  AND ((",
+         "AND c.dataset=r.dataset AND c.answer_model=r.metadata->>'answer_model_alias'"
+         "\n                  "
+         + cell_filter + "\n                  AND (("),
+        ("AND c.evaluation_run_id=NEW.evaluation_run_id", _JUDGE),
+    )
+
+
+def scoped_completion_function(definition: str) -> str:
+    """Exact, reversible edits of the installed body, including idempotent replay."""
+    if _OLD_MARKER in definition or _MARKER in definition:
+        legacy = _OLD_MARKER in definition
+        original = definition
+        for before, after in reversed(_changes(legacy=legacy)):
+            if original.count(after) != 1:
+                raise ValueError("step8_evaluation_scope_extension_drift")
+            original = original.replace(after, before, 1)
+        updated = scoped_completion_function(original)
+        if not legacy and updated != definition:
+            raise ValueError("step8_evaluation_scope_extension_drift")
+        return updated
+    for before, after in _changes():
+        if definition.count(before) != 1:
+            raise ValueError("step8_evaluation_completion_contract_mismatch")
+        definition = definition.replace(before, after, 1)
+    return definition
+
+
+def install_evaluation_scope(connection) -> dict:
+    """Run inside an owner transaction; no answer, gold, score or ledger mutations."""
+    row = connection.execute(
+        "SELECT pg_get_functiondef(%s::regprocedure) AS definition", (FUNCTION,)
+    ).fetchone()
+    before = row["definition"]
+    after = scoped_completion_function(before)
+    if before != after:
+        connection.execute(after)
+    def digest(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    return {"version": VERSION, "function": FUNCTION, "before_sha256": digest(before),
+            "after_sha256": digest(after), "changed": before != after,
+            "table_schema_changed": False, "scientific_rows_changed": False}

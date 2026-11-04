@@ -1,0 +1,15 @@
+protocol_version: pmmc-doubter-v1.1
+prompt_version: pmmc-doubter-v1.1
+renderer_version: doubter-evidence-renderer-v1.1
+parser_version: doubter-json-parser-v1.1
+schema_version: doubter-assessment-schema-v1.1
+decision_policy_version: doubter-server-policy-v2
+directive_policy_version: planner-revision-directives-v2
+r0_input_policy_version: r0-input-gate-v2
+routing_projection_version: verified-qbank-projection-v2
+doubter_model_alias: compiler-qwen3.5-9b
+total_context_tokens: 32768
+reserved_output_tokens: 4096
+active_round: 2
+max_round: 3
+max_evidence_items: 50

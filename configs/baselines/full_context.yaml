@@ -1,0 +1,17 @@
+protocol_version: full-context-protocol-v1
+renderer_version: full-context-renderer-v1
+prompt_version: full-context-answer-v1
+prompt_path: prompts/baselines/full_context_answer_v1.txt
+answer_model_alias: answer-qwen3.5-9b
+total_context_tokens: 32768
+reserved_output_tokens: 1024
+max_input_tokens: 31744
+temperature: 0.0
+top_p: 1.0
+seed: 0
+max_output_tokens: 1024
+job_max_attempts: 2
+job_retry_delay_seconds: 5.0
+concurrency: 8
+query_image_policy: preserve
+caption_policy: benchmark_only

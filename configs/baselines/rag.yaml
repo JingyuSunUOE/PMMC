@@ -1,0 +1,33 @@
+protocol_version: rag-protocol-v1
+renderer_version: rag-renderer-v1
+answer_prompt_version: full-context-answer-v1
+answer_prompt_path: prompts/baselines/full_context_answer_v1.txt
+query_instruction_version: qwen-memory-retrieval-query-v1
+query_instruction_template: |-
+  Instruct: Given a user query about a conversation history, retrieve the memory passages needed to answer it.
+  Query: {query}
+answer_model_alias: answer-qwen3.5-9b
+caption_text_embedding_alias: qwen3-embedding-8b
+contrastive_embedding_alias: siglip2-so400m-patch14-384
+native_multimodal_embedding_alias: qwen3-vl-embedding-8b
+retrieval_top_k: 50
+answer_top_k: 5
+distance_metric: cosine
+exact_scan: true
+use_reranker: false
+contrastive_text_weight: 0.5
+contrastive_image_weight: 0.5
+total_context_tokens: 32768
+reserved_output_tokens: 1024
+max_input_tokens: 31744
+temperature: 0.0
+top_p: 1.0
+seed: 0
+max_output_tokens: 1024
+caption_text_batch_size: 32
+contrastive_batch_size: 32
+native_multimodal_batch_size: 8
+embedding_concurrency: 8
+answer_concurrency: 8
+job_max_attempts: 2
+job_retry_delay_seconds: 5.0
