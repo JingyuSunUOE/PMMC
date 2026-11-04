@@ -10,6 +10,7 @@ COPY --chmod=0555 --from=mc ${PMMC_MC_SOURCE} /usr/local/bin/mc
 FROM iam-tools-readable AS iam
 COPY --chmod=0555 step8_iam.py /opt/pmmc-step8/step8_iam.py
 RUN printf '%s  /usr/local/bin/mc\n' ac90da87a35641be5a0ac75d49de5161ddb47d629b5ba01261b0ae9e00aea15f | sha256sum -c - \
+    && cmp /opt/pmmc-step8/step8_iam.py /workspace/docker/minio/step8_iam.py \
     && python /workspace/docker/verify_source_contracts.py /workspace/src \
     && python /workspace/docker/verify_step8_source_contracts.py /workspace --runtime \
     && python -c "import runpy; runpy.run_path('/opt/pmmc-step8/step8_iam.py', run_name='build_check')" \

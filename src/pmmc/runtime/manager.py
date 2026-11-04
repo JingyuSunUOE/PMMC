@@ -669,6 +669,8 @@ def prepare_runtime(
         else settings.resolved_runtime_profile_path
     )
     profile = load_runtime_profile(resolved_profile_path)
+    if profile.metadata.get("release_visible_gpus") == 0:
+        raise ManagedRuntimeError("unmeasured CPU planning profile cannot start a GPU runtime")
     if replica_count <= 0:
         raise ManagedRuntimeError("replica_count must be positive")
     _validate_runtime_ports(settings, profile)

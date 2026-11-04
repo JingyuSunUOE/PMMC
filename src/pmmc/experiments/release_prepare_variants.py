@@ -18,7 +18,8 @@ def main():
     for variant in plan["variants"]:
         print(f"PMMC_PREPARE variant={variant}", flush=True)
         children[variant] = prepare_exploration(get_settings(), run, variant=variant)
-    print(json.dumps(children[anchor], sort_keys=True, default=str), flush=True)
+    result=dict(children[anchor],plan_needs_gpu=any(child["gpu_stages"] for child in children.values()))
+    print(json.dumps(result, sort_keys=True, default=str), flush=True)
 
 
 if __name__ == "__main__":

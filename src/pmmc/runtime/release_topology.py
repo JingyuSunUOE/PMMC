@@ -48,7 +48,7 @@ def derive(root, spec):
     count, tp, workers = (spec[k] for k in ("gpus", "answer_tp", "workers"))
     if (
         type(count) is not int
-        or not 1 <= count <= 64
+        or not 0 <= count <= 64
         or type(tp) is not int
         or tp not in (1, 2, 4, 8)
         or count % tp
@@ -61,8 +61,18 @@ def derive(root, spec):
         raise ValueError("release runtime override changes the scientific workload")
     runtime = source.model_dump(mode="json")
     runtime["metadata"]["release_visible_gpus"] = count
+    if count == 0:
+        runtime["metadata"].update(
+            release_planning_only=True, calibration_status="unmeasured_no_gpu_allocation"
+        )
     replicas = {}
     for service in runtime["services"]:
+        if count == 0:
+            # No fabricated replica layout or capacity receipt. The template's
+            # models, processor limits, precision and gated services stay intact.
+            for key in ("frozen_replica_topology", "calibrated_placement_options"):
+                service["metadata"].pop(key, None)
+            continue
         parallel = tp if service["metadata"].get("requires_capacity_receipt") is True else 1
         placement = {"tensor_parallel_size": parallel, "replica_count": count // parallel}
         service["tensor_parallel_candidates"] = [parallel]
@@ -70,7 +80,8 @@ def derive(root, spec):
             frozen_replica_topology=placement, calibrated_placement_options=[placement]
         )
         replicas[service["role"]] = placement["replica_count"]
-    replicas["judge"] = replicas["compiler"]
+    if count:
+        replicas["judge"] = replicas["compiler"]
     execution = load_execution_config(root / EXECUTION).model_dump(mode="json")
     execution["replicas"].update(replicas)
     execution["unit_preparation"]["workers"] = min(workers, 64)

@@ -1340,9 +1340,7 @@ async def evaluate_step8_query(
                 "image_gold_requires_lossless_source_or_explicit_annotation",
             ],
         }
-        payload = (
-            json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
-        ).encode()
+        payload = _score_bytes(report)
         report = json.loads(payload)
         artifact = await artifacts.put_bytes(
             # Failed attempts are immutable diagnostics, not a cached success that
@@ -1376,6 +1374,10 @@ async def evaluate_step8_query(
         await engine.dispose()
 
 
+def _score_bytes(report: dict) -> bytes:
+    return (json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+
+
 async def verify_selected_score_recovery(
     settings: Settings, output: dict, *, campaign_id: str, suite_id: str,
     source_run_id: str, query_id: str, snapshot_id: str, method_scope: MethodScope,
@@ -1383,8 +1385,7 @@ async def verify_selected_score_recovery(
     """A saved worker receipt cannot replace the SQL-triggered completion attestation."""
     report = {k: v for k, v in output.items() if k != "artifact"}
     artifact = output.get("artifact") or {}
-    digest = hashlib.sha256((json.dumps(report, sort_keys=True, separators=(",", ":"),
-                                       allow_nan=False) + "\n").encode()).hexdigest()
+    digest = hashlib.sha256(_score_bytes(report)).hexdigest()
     expected = {"campaign_id": campaign_id, "suite_id": suite_id, "query_id": query_id,
                 "method_scope": method_scope, "status": "complete", "schema_version": _VERSION,
                 "scientific_approval": False,
@@ -1407,6 +1408,10 @@ async def verify_selected_score_recovery(
                     or row.run_id != source_run_id or row.query_id != query_id or row.snapshot_id != snapshot_id
                     or any(getattr(row, k) != artifact.get(k) for k in ("sha256", "object_key", "storage_uri"))):
                 raise ValueError("release_score_recovery_requires_committed_evaluation")
+            object_key = row.object_key
+        _, evaluation_store = create_evaluator_object_stores(settings)
+        if hashlib.sha256(await evaluation_store.get_bytes(object_key)).hexdigest() != digest:
+            raise ValueError("release_score_recovery_artifact_changed")
     finally:
         await engine.dispose()
 

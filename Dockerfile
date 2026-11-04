@@ -128,7 +128,9 @@ RUN python3 -m pip uninstall -y lmcache opentelemetry-exporter-prometheus \
 # third-party payloads are excluded by .dockerignore and mounted at runtime.
 COPY --chown=${USER_ID}:${GROUP_ID} . .
 
-RUN python3 docker/verify_source_contracts.py /workspace/src \
+RUN sha256sum --quiet --strict --check SOURCE.sha256 \
+    && test ! -e deploy/release/images.lock.json \
+    && python3 docker/verify_source_contracts.py /workspace/src \
     && python3 docker/verify_step8_source_contracts.py /workspace --runtime \
     && mkdir -p artifacts outputs runs \
     && chown "${USER_ID}:${GROUP_ID}" /workspace artifacts outputs runs

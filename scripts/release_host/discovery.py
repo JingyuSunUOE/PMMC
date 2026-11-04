@@ -12,6 +12,10 @@ from .topology import BOUNDS, normalize
 FIELDS = {"cpu": "cpus", "memory": "memory_gib", "nvidia.com/gpu": "gpus"}
 
 
+class NoGpuAvailable(Error):
+    """Eligible nodes exist, but none can supply even one allowed GPU."""
+
+
 # Do not return unrelated Pods' arguments, env, annotation payloads or volume
 # sources to the host process. Kube names cannot contain these delimiters.
 def pod_projection():
@@ -168,6 +172,8 @@ def from_snapshot(cfg, nodes, pods, quotas, roles):
     policy = cfg["resource_policy"]
     eligible = []
     reasons = set()
+    matched_nodes = 0
+    positive_gpu = False
     for node in nodes:
         meta, spec, status = node["metadata"], node.get("spec", {}), node.get("status", {})
         host = meta.get("labels", {}).get("kubernetes.io/hostname")
@@ -188,6 +194,7 @@ def from_snapshot(cfg, nodes, pods, quotas, roles):
             )
         ):
             continue
+        matched_nodes += 1
         fresh = copy.deepcopy(cfg)
         caps = {}
         for key, axis in FIELDS.items():
@@ -214,8 +221,10 @@ def from_snapshot(cfg, nodes, pods, quotas, roles):
         elif caps["gpus"] < 1:
             reasons.add("no available single-node GPU")
             continue
+        else:
+            positive_gpu = True
         if roles.intersection(GPU_ROLES) and requested["gpus"] == 0:
-            raise Error("GPU phase cannot use a zero GPU ceiling")
+            raise NoGpuAvailable("GPU phase cannot use a zero GPU ceiling")
         # Auto may reduce parallelism to fit CPU headroom or an explicit TP;
         # never alter the model, precision, context or image workload.
         counts = range(caps["gpus"], 0, -1) if requested["gpus"] == "auto" else [requested["gpus"]]
@@ -236,6 +245,8 @@ def from_snapshot(cfg, nodes, pods, quotas, roles):
         }
         t = fresh["topology"]
         eligible.append(((-t["gpus"], -t["cpus"], -t["memory_gib"], host), fresh))
+    if matched_nodes and roles.intersection(GPU_ROLES) and not positive_gpu:
+        raise NoGpuAvailable("no available single-node GPU within node and namespace bounds")
     check(
         eligible,
         "no eligible single node fits namespace and phase bounds: "
@@ -244,10 +255,23 @@ def from_snapshot(cfg, nodes, pods, quotas, roles):
     return min(eligible, key=lambda row: row[0])[1]
 
 
-def resolve(cfg, invoke, roles=None):
+def _planning_attempt(resolve_roles, roles, fallback):
+    phases = set(DEFAULTS if roles is None else roles)
+    check(phases <= DEFAULTS.keys(), "unknown deployment phase in resource discovery")
+    try:
+        return resolve_roles(phases)
+    except NoGpuAvailable:
+        if not fallback or not phases.intersection(GPU_ROLES):
+            raise
+    cfg = resolve_roles(phases.difference(GPU_ROLES))
+    cfg["resource_policy"]["cpu_planning_only"] = True
+    return cfg
+
+
+def resolve(cfg, invoke, roles=None, *, allow_cpu_fallback=False):
     if cfg["cluster"]["discovery"] == "declared":
         check(cfg["resource_policy"]["explicit_envelope"], "explicit capacity envelope required")
-        return cfg
+        return _planning_attempt(lambda active: _declared(cfg, active), roles, allow_cpu_fallback)
     kube = ["kubectl", "--context", cfg["cluster"]["context"]]
     ns = cfg["cluster"]["namespace"]
     try:
@@ -264,6 +288,35 @@ def resolve(cfg, invoke, roles=None):
             "or explicitly set discovery=declared with a verified capacity envelope"
         ) from exc
     try:
-        return from_snapshot(cfg, nodes, pods, quotas, roles)
+        return _planning_attempt(
+            lambda active: from_snapshot(cfg, nodes, pods, quotas, active),
+            roles,
+            allow_cpu_fallback,
+        )
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         raise Error("invalid Kubernetes inventory or unsupported resource quantity") from exc
+
+
+def _declared(cfg, phases):
+    active = set(phases)
+    if active != {"analysis-report"}:
+        active.update(("postgres", "minio"))
+    policy = cfg["resource_policy"]
+    requested = dict(policy["requested"])
+    if not active.intersection(GPU_ROLES):
+        requested.update(gpus=0, answer_tp=1)
+    elif not cfg["capacity"]["gpus"] or requested["gpus"] == 0:
+        raise NoGpuAvailable("declared capacity does not permit a GPU")
+    gpu = requested["gpus"]
+    counts = range(cfg["capacity"]["gpus"], 0, -1) if gpu == "auto" else [gpu]
+    for count in counts:
+        fresh = copy.deepcopy(cfg)
+        fresh["resources"] = copy.deepcopy(policy["per_role"])
+        try:
+            normalize(fresh, {**requested, "gpus": count}, roles=active)
+        except Error as exc:
+            reason = str(exc)
+            continue
+        fresh["resource_policy"] = dict(policy)
+        return fresh
+    raise Error("declared capacity does not fit this phase: " + reason)

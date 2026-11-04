@@ -77,3 +77,74 @@ def test_scope_controls_real_calibration_stages():
     assert stages[0][1].metadata["requires_capacity_receipt"]
     with pytest.raises(ValueError, match="no runtime service"):
         calibration_stages(profile, {"unknown-model"})
+
+
+def test_zero_gpu_profile_is_plan_only(tmp_path, monkeypatch):
+    from shutil import copytree
+
+    from pmmc.runtime.manager import ManagedRuntimeError, prepare_runtime
+
+    root = tmp_path.resolve()
+    copytree(ROOT / "configs/release", root / "configs/release")
+    settings = SimpleNamespace(
+        project_root=root, outputs_path=root / "outputs", resolve_path=lambda p: root / p
+    )
+    spec = {"gpus": 0, "workers": 2, "answer_tp": 1, "source_profile": str(RUNTIME)}
+    monkeypatch.setenv("PMMC_RELEASE_TOPOLOGY", json.dumps(spec))
+    paths = materialize(settings)
+    frozen_path = root / paths["runtime_profile"]
+    frozen = load_runtime_profile(frozen_path)
+    assert frozen.metadata["release_visible_gpus"] == 0 and frozen.metadata["release_planning_only"]
+    assert not any(s.metadata.get("frozen_replica_topology") for s in frozen.services)
+    reference = load_runtime_profile(ROOT / RUNTIME)
+    assert [s.model_alias for s in frozen.services] == [s.model_alias for s in reference.services]
+    (gated,) = frozen.services_for_stage("answer_27b")
+    assert gated.metadata["requires_capacity_receipt"]
+    assert capacity_image_workload(gated, multimodal=True) == capacity_image_workload(
+        reference.services_for_stage("answer_27b")[0], multimodal=True
+    )
+    with pytest.raises(ManagedRuntimeError, match="CPU planning profile"):
+        prepare_runtime(settings, profile_path=frozen_path)
+    with pytest.raises(RuntimePlanningError, match="CPU planning profile"):
+        build_runtime_plan(frozen, None, None, {}, None)
+
+
+def test_cpu_plan_verifies_native_scope_before_registration(tmp_path, monkeypatch):
+    from pmmc.experiments import release_execution, release_models
+    from pmmc.runtime.config import write_runtime_profile
+    from pmmc.schemas.step8 import CampaignPhase
+
+    profile, _ = derive(
+        ROOT, {"gpus": 0, "answer_tp": 1, "workers": 2, "source_profile": str(RUNTIME)}
+    )
+    path = tmp_path / "profile.yaml"
+    write_runtime_profile(profile, path)
+    settings = SimpleNamespace(resolve_path=lambda p: p)
+    manifest = SimpleNamespace(phase=CampaignPhase.EXPLORATION)
+    monkeypatch.setattr(
+        release_execution, "_load", lambda _: (manifest, SimpleNamespace(runtime_profile=path))
+    )
+    monkeypatch.setattr(
+        release_execution,
+        "_latest_selection",
+        lambda _: SimpleNamespace(selection="dev-all", content_hash="id"),
+    )
+    gpu = {"baselines": True}
+    monkeypatch.setattr(
+        release_models, "stage_requirements", lambda *a: {"local_gpu_required_by_stage": gpu}
+    )
+
+    class ReachedRegistration(Exception):
+        pass
+
+    def register(*args, **kwargs):
+        raise ReachedRegistration()
+
+    monkeypatch.setattr(release_execution, "_register", register)
+    with pytest.raises(ValueError, match="requires_gpu_but_allocation_is_zero"):
+        release_execution.execute_stage(settings, tmp_path, "baselines", "control")
+    gpu.update(baselines=False)
+    with pytest.raises(ValueError, match="requires_gpu_but_allocation_is_zero"):
+        release_execution.execute_stage(settings, tmp_path, "baselines", "gpu")
+    with pytest.raises(ReachedRegistration):
+        release_execution.execute_stage(settings, tmp_path, "baselines", "control")

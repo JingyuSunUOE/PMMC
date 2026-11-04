@@ -342,6 +342,8 @@ def build_runtime_plan(
     logical_stage: str | None = None,
     replica_counts: Mapping[ModelRole, int] | None = None,
 ) -> ManagedRuntimePlan:
+    if profile.metadata.get("release_visible_gpus") == 0:
+        raise RuntimePlanningError("unmeasured CPU planning profile cannot allocate GPUs")
     if not inventory.devices:
         raise RuntimePlanningError("the Pod exposes no GPUs")
     visible = profile.metadata.get("release_visible_gpus")

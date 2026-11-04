@@ -18,6 +18,7 @@ def service_backend(images):
     return Kubernetes(
         {
             "instance": NAME,
+            "identity": {"uid": 10001, "gid": 10001},
             "images": images,
             "cluster": {
                 "context": CONTEXT,
@@ -101,6 +102,7 @@ def check():
         raise RuntimeError("use only with the release CI job's disposable Kind kubeconfig")
     backend = service_backend(json.loads(UPSTREAM.read_bytes()))
     kube("create", "namespace", NS)
+    kube("label", "namespace", NS, "pod-security.kubernetes.io/enforce=restricted")
     secret = backend.obj("Secret", f"{NAME}-credentials")
     secret.update(
         immutable=True,
@@ -120,6 +122,10 @@ def check():
             kube("create", "-f", "-", obj=obj)
     for name in services:
         kube("rollout", "status", f"statefulset/{name}", "--timeout=300s")
+        if kube("exec", name + "-0", "--", "id", "-u") != str(
+            backend.cfg["identity"]["uid"]
+        ) or kube("exec", name + "-0", "--", "id", "-g") != str(backend.cfg["identity"]["gid"]):
+            raise ValueError("service did not use its configured non-root identity")
     wait_final_database()
 
     marker = secrets.token_hex(24)

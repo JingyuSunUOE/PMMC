@@ -160,6 +160,7 @@ class _Progress:
                 print(
                     json.dumps(
                         dict(
+                            protocol="release-assets-v2",
                             dataset=self.dataset,
                             phase=phase,
                             files=self.finished,

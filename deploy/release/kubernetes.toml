@@ -22,10 +22,10 @@ shared_access_mode = "ReadWriteMany"
 # create_shared_pvc = true
 # shared_storage_class = "rwx-class"
 # shared_storage_gib = 512
-# Managed layout uses a one-time, digest-pinned CHOWN-only root initializer
-# on THIS claim, then verifies as identity.uid/gid. It sets the owner only
-# on newly created leaves; no recursive chown, no credential mounts, no token.
-# If admission forbids that initializer, pre-provision a claim instead.
+# Layout, report setup and service pods use identity.uid/gid, never UID 0.
+# Use storage classes whose volume roots are writable by that identity, or
+# ask the site admin to provision the dedicated roots/directories with ACLs.
+# No root helper, fsGroup traversal or recursive permission repair is requested.
 # Live discovery needs read-only Node and all-namespace Pod inventory in
 # addition to namespace ResourceQuotas. To opt out with an explicitly verified
 # [capacity] envelope, set discovery = "declared"; quota still gates every Job.
@@ -69,7 +69,7 @@ benchmark_config = "/workspace/configs/release/prepare-models.yaml"
 # rate_card = "/pmmc-inputs/rate-card.yaml"
 
 # Optional private pricing files in <instance>-rates. The two keys are
-# rate-card.yaml and provider-policy.json; only quote/approve/control mount them.
+# rate-card.yaml and provider-policy.json; only quote/approve/approved control mount them.
 # The preferred mode is a UI suggestion, NEVER a budget approval.
 [billing]
 policy_secret = false

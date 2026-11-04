@@ -22,7 +22,7 @@ from pmmc.release_plan import (
     plan_hash,
 )
 
-from .backends import Kueue, resolve_kubernetes_resources
+from .backends import Kueue, resolve_planning_resources
 from .config import (
     ROOT,
     SUITE,
@@ -54,6 +54,19 @@ def parser():
     from .private_deploy import add_private_commands
 
     add_private_commands(sub)
+    for cmd in ("spend", "stop-budget"):
+        admin = sub.add_parser(cmd)
+        admin.add_argument("--run", required=True)
+        admin.add_argument("--variant", choices=VARIANTS)
+        if cmd == "stop-budget":
+            for flag in (
+                "plan-hash",
+                "selection-hash",
+                "approval-id",
+                "operator-id",
+                "reason-code",
+            ):
+                admin.add_argument("--" + flag, required=True)
     p = sub.add_parser("services")
     p.add_argument("operation", choices=("up", "status"))
     p.add_argument("--config")
@@ -74,7 +87,7 @@ def parser():
             continue
         p.add_argument("--config", help="deployment TOML, defaults to PMMC_DEPLOY_CONFIG")
         if verb in ("quote", "approve"):
-            p.add_argument("--variant", choices=VARIANTS, default="wr")
+            p.add_argument("--variant", choices=VARIANTS)
             p.add_argument("--stage", choices=("main", "analysis", "baselines"))
             p.add_argument("--rate-card")
             if verb == "approve":
@@ -135,8 +148,11 @@ def describe(cfg, plan):
         selection=plan,
         stages=units(plan),
         resources=cfg["resources"],
+        allocation_basis=cfg["resource_policy"]["source"],
+        capacity_certified=False,
+        suggested_approval=cfg.get("billing", {}).get("preferred_mode", "finite"),
         paper_result=False,
-        gpu_required=not only_read,
+        gpu_required=False if only_read else (None if plan["components"] else True),
         models_with_possible_api_cost=[] if only_read else paid,
         paid_state="quote_and_explicit_approval_required"
         if paid and not only_read
@@ -160,6 +176,22 @@ def main(argv=None):
         root = state_root()
         run = identifier(getattr(args, "run", None) or "exp-" + uuid.uuid4().hex[:16])
         folder = root / "runs" / run
+        if args.verb in ("spend", "stop-budget"):
+            from .budget_ops import audit
+
+            plan = normalize_plan(read(folder / "plan.json"))
+            args.variant = args.variant or plan["variants"][0]
+            check(args.variant in plan["variants"], "undeclared budget variant")
+            request = dict(kind=args.verb, variant=args.variant)
+            if args.verb == "stop-budget":
+                check(args.plan_hash == plan_hash(plan), "plan hash mismatch")
+                request.update(
+                    selection_hash=approval_id(args.selection_hash),
+                    approval_id=approval_id(args.approval_id),
+                    operator_id=identifier(args.operator_id),
+                    reason_code=identifier(args.reason_code),
+                )
+            return audit(root, read(folder / "deployment.json"), plan, request)
         if args.verb in ("status", "diagnostics"):
             state = read(folder / "progress.json")
             if args.verb == "status":
@@ -216,16 +248,26 @@ def main(argv=None):
                 else public_plan(args, run)
             )
         if args.verb == "plan":
-            details = describe(resolve_kubernetes_resources(cfg, roles=planned_roles(plan)), plan)
+            details = describe(
+                resolve_planning_resources(
+                    cfg, roles=planned_roles(plan), allow_cpu_fallback=bool(plan["components"])
+                ),
+                plan,
+            )
             if (folder / "plan.json").exists() and read(folder / "plan.json") == plan:
                 details["prepared_selections"] = read(folder / "progress.json").get("prepared", {})
             print(json.dumps(details, sort_keys=True, indent=2))
             return 0
         action = None
         if args.verb in ("quote", "approve"):
+            check(
+                plan["stage"] != "analysis" or plan["with_deps"],
+                "a read-only analysis has no paid targets; no quote or approval is needed",
+            )
             card = args.rate_card or cfg["native"].get("rate_card")
             check(card, "supply a reviewed private --rate-card")
-            stage = args.stage or ("main" if plan["stage"] == "all" else plan["stage"])
+            stage = args.stage or ("main" if plan["stage"] in ("all","analysis") else plan["stage"])
+            args.variant = args.variant or plan["variants"][0]
             check(args.variant in plan["variants"], "variant not declared by frozen plan")
             action = dict(
                 kind=args.verb, variant=args.variant, stage=stage, rate_card=native_path(card)

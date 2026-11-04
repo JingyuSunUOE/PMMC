@@ -39,6 +39,7 @@ NUMBERS = {
     "count",
     "observed",
     "bytes",
+    "bytes_received",
     "total_bytes",
     "bytes_downloaded",
     "cached_files",
@@ -85,6 +86,17 @@ def project(data):
             out[k] = v
         elif k in ("state", "stage", "worker_pool") and isinstance(v, str) and v in STATES:
             out[k] = v
+        elif k == "dataset" and v in ("memlens", "memgallery"):
+            out[k] = v
+        elif k == "phase" and v in (
+            "check",
+            "download",
+            "materialize",
+            "repaired",
+            "installed",
+            "verified",
+        ):
+            out[k] = v
         elif (
             k in ("error_code", "code")
             and isinstance(v, str)
@@ -121,6 +133,7 @@ def safe_log(text):
                     "step8-model-preparation-v1",
                     "step8-minio-iam-v1",
                     "pmmc-release-stage-v1",
+                    "release-assets-v2",
                 ):
                     continue
                 fields = project(value)

@@ -33,8 +33,11 @@ before downloading. MEMLENS uses only its original 32K JSON and image archive.
 Candidate trees are checked against the lock over sorted
 `[relative_path, byte_count, sha256]` triples. Complete local trees are checked
 without any network access. Stderr shows aggregate progress; the last stdout
-line is a `release-assets-v2` ready receipt with the plan hash and selected
-source identities. A failed check must not produce a ready receipt.
+line is a `release-assets-v2` ready receipt with the plan hash, selected
+source identities, and exact `file_counts`. The dependency-free
+`pmmc.release_asset_receipt.validate_asset_receipt(receipt, plan)` rejects wrong
+plans, missing/extra datasets, wrong counts and unlocked trees. A failed check
+must not produce a ready receipt.
 
 Use one filesystem for staging and publication. First install is an atomic
 directory rename. Repair uses atomic directory exchange (Linux or macOS; the
@@ -79,6 +82,14 @@ After planning, the models workload validates the complete immutable model
 registry and lock. It provisions the HF entries used by the selected native job
 inventory (including tokenizer-only dependencies), not every possible answer
 backbone. Native provider identities are verified, not downloaded or invoked.
-Use `PMMC_RELEASE_VARIANT` for the prepared variant and, for a single execution
-stage of a broader plan, `PMMC_RELEASE_STAGE`. The pointer binds the per-stage
-aliases, selection, inventory hash and normalized request hash.
+Use `PMMC_RELEASE_VARIANT` and `PMMC_RELEASE_STAGE` to provision a single
+execution stage. Explicit prepare uses `PMMC_RELEASE_STAGE=prepare-all`: it
+requires a verified pointer for every selected variant, and unions the stages
+actually present in those inventories. A CPU-only analysis which needs a main
+producer does not invent an analysis worker stage. GPU service calibration
+uses the selected jobs' execution classes; a model needed only for token
+counting does not authorize starting its GPU pool. The per-variant pointer
+binds `selected` (development denominator), `gpu_stages`,
+`local_gpu_required_by_stage`, `local_gpu_required`, model aliases, selection,
+job inventory and normalized request hash. An empty service set does not
+consult or measure the 27B pool.

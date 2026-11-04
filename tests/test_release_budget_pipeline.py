@@ -16,6 +16,7 @@ from scripts.release_host.workloads import command, secret_refs
 from typer.testing import CliRunner
 
 from pmmc.experiments import release_execution, release_prepare_variants, step8_cli
+from pmmc.experiments.release_models import stage_requirements
 from pmmc.experiments.release_reporting import _plan_paid_stages, verify_release_budget_pointer
 from pmmc.experiments.release_scope import read_scope
 from pmmc.experiments.step8_artifacts import write_json
@@ -47,7 +48,7 @@ def test_ablation_dependency_scopes_match_readouts():
 
 
 @pytest.mark.parametrize("limit", [Decimal("2"), None])
-def test_host_quote_approve_dispatch_and_stop(tmp_path, monkeypatch, limit):
+def test_host_quote_approve_dispatch_and_stop(tmp_path, monkeypatch, capsys, limit):
     plan = normalize_plan(dict(run_id="trial", stage="all", models=[GPT]))
     dirs, rows, card = budget_children(tmp_path, plan)
     settings = SimpleNamespace(
@@ -68,13 +69,22 @@ def test_host_quote_approve_dispatch_and_stop(tmp_path, monkeypatch, limit):
     prepared = []
 
     def prepare(settings, run_id, variant):
-        selected = step8_cli._latest_selection(dirs[variant]).content_hash
+        folder = dirs[variant]
+        selected = step8_cli._latest_selection(folder)
+        manifest, _ = step8_cli._load(folder)
+        requirements = stage_requirements(folder, manifest, selected.content_hash)
+        gpu_stages = sorted(
+            k for k, needed in requirements["local_gpu_required_by_stage"].items() if needed
+        )
         info = dict(
             run_id=run_id,
             variant=variant,
-            selected={},
+            selected={d.value: len(ids) for d, ids in selected.query_ids.items()},
             release_plan_hash=plan_hash(plan),
-            selection_hash=selected,
+            selection_hash=selected.content_hash,
+            **requirements,
+            gpu_stages=gpu_stages,
+            local_gpu_required=bool(gpu_stages),
             state="planned",
             phase="exploration",
             paper_result=False,
@@ -104,6 +114,11 @@ def test_host_quote_approve_dispatch_and_stop(tmp_path, monkeypatch, limit):
     )
     release_prepare_variants.main()
     assert prepared == plan["variants"]
+    pointer = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert pointer["local_gpu_required_by_stage"] == dict.fromkeys(
+        ("main", "baselines", "analysis"), False
+    )
+    assert pointer["gpu_stages"] == [] and pointer["plan_needs_gpu"] is False
 
     db = MemoryLedger(limit)
     db.row = None
@@ -231,10 +246,9 @@ def test_host_quote_approve_dispatch_and_stop(tmp_path, monkeypatch, limit):
                 isolated.setenv(key, val)
             ptr = command("pointer", cfg, "trial", stage, run)
             isolated.setattr(sys, "argv", ["-c", *ptr[3:]])
-            exec(ptr[2], {})
-            verify_release_budget_pointer(
-                settings, run_id="trial", variant=arm, stage=stage, approval_id=aid
-            )
+            with pytest.raises(SystemExit) as verified:
+                exec(ptr[2], {})
+            assert verified.value.code == 0
         result = invoke("control", run, stage, aid)
         assert (
             result["paid_authorized"]

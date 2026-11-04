@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from scripts.release_host import backends, private_io, private_secrets
 from scripts.release_host import private_deploy as deploy
+from scripts.release_host import private_policy as pricing
 from scripts.release_host.config import Error
 from scripts.release_host.private_io import json_bytes, sha256
 from scripts.release_host.private_source import IMAGE_LOCK, source_files
@@ -42,6 +43,10 @@ def public_fixture():
     }
     files = {
         "scripts/pmmc": b"#!/usr/bin/env python3\n",
+        "configs/release/prepare-models.yaml": b"model_registry: configs/release/models.yaml\n",
+        "configs/release/models.yaml": (
+            b"models:\n- provider_model: fixture-model\n  provider_config: {kind: openai}\n"
+        ),
         "deploy/release/upstream.json": json_bytes({k: refs[k] for k in ("postgres", "minio")}),
         "configs/release/models.lock.json": json_bytes(
             {"entries": [{"commit_sha": "1" * 40, "snapshot_content_hash": "8" * 64}]}
@@ -168,6 +173,171 @@ def test_roundtrip_no_private_plaintext(packet, monkeypatch):
         deploy.install(install)
     with pytest.raises(FileExistsError):
         deploy.pack(args)
+
+
+def reviewed_fixture(files):
+    model = "fixture-model"
+    card = {
+        "estimated": False,
+        "models": {model: dict.fromkeys(pricing.PRICE_KEYS, "1.25")},
+        "rate_limits": {
+            model: {
+                "provider": "openai",
+                "account_scope": "synthetic-scope",
+                "model_scope": model,
+                "requests_per_minute": 1,
+                "tokens_per_minute": 32768,
+            }
+        },
+    }
+    import yaml
+
+    rates = yaml.safe_dump(card).encode()
+    review = {
+        "protocol": "pmmc-release-rate-review-v1",
+        "currency": "USD",
+        "pricing_basis": "standard_global_first_party_synchronous_before_tax",
+        "reviewed_by": "fixture-reviewer",
+        "reviewed_date": "2020-01-01",
+        "rate_card_file": pricing.CARD,
+        "rate_card_sha256": sha256(rates),
+        "model_registry_sha256": sha256(files["configs/release/models.yaml"]),
+        "pricing_sources": {model: "https://pricing.example.invalid/fixture"},
+    }
+    return {pricing.CARD: rates, pricing.REVIEW: json_bytes(review)}
+
+
+def test_ciphertext_policy_install_and_immutable_import(packet, tmp_path, monkeypatch):
+    args, install, captured, files = packet
+    pair = reviewed_fixture(files)
+    args.output = tmp_path / "pricing.age"
+    args.rate_card = write(tmp_path / "card-input", pair[pricing.CARD])
+    args.provider_policy = write(tmp_path / "review-input", pair[pricing.REVIEW])
+    receipt = deploy.pack(args)
+    install.bundle, install.bundle_sha256 = args.output, receipt["bundle_sha256"]
+    opened = deploy.decrypt(install)
+    assert opened.policy == pair and opened.cfg["billing"]["policy_secret"] is True
+    assert opened.cfg["native"]["rate_card"] == "/pmmc-inputs/rate-card.yaml"
+    assert opened.cfg["billing"]["preferred_mode"] == "finite"
+    assert json.loads(captured["plain"])["format"] == deploy.POLICY_FORMAT
+    stored = {}
+    calls = []
+
+    def kube(argv, data=None, *, kube):
+        assert kube and argv[:5] == [
+            "kubectl",
+            "--context",
+            "private-fixture-context",
+            "--namespace",
+            "trial-ns",
+        ]
+        calls.append(argv)
+        assert not any("synthetic-scope" in word for word in argv)
+        if "get" in argv:
+            assert argv[argv.index("secret") + 1] == "trial-rates"
+            return json_bytes(stored) if stored else b""
+        assert argv[-3:] == ["create", "-f", "-"] and not stored
+        stored.update(json.loads(data))
+        assert stored["immutable"] is True and stored["metadata"] == {
+            "name": "trial-rates",
+            "namespace": "trial-ns",
+        }
+        assert {k: base64.b64decode(v, validate=True) for k, v in stored["data"].items()} == pair
+        return b""
+
+    monkeypatch.setattr(pricing, "invoke", kube)
+    assert deploy.install(install)["pricing_policy"].startswith("bundled") and not calls
+    for f in install.destination.rglob("*"):
+        if f.is_file():
+            assert all(s not in f.read_bytes() for s in (b"synthetic-scope", b"fixture-reviewer"))
+    install.private_action = "import-policy"
+    assert deploy.run_private_command(install) == {"pricing_policy": "created"}
+    assert deploy.run_private_command(install) == {"pricing_policy": "unchanged"}
+    for change in (
+        {"immutable": False},
+        {"data": {**stored["data"], "HF_TOKEN": "eA=="}},
+        {"data": {**stored["data"], pricing.CARD: "eA=="}},
+    ):
+        old = dict(stored)
+        stored.update(change)
+        with pytest.raises(Error, match="refusing replacement"):
+            deploy.run_private_command(install)
+        stored.update(old)
+    assert [argv for argv in calls if "create" in argv] == [calls[1]]
+    envelope = json.loads(captured["plain"])
+    envelope["pricing_policy"][pricing.CARD] = deploy.blob(pair[pricing.CARD] + b"\n")
+    captured["plain"] = json_bytes(envelope)
+    count = len(calls)
+    with pytest.raises(Error, match="checksum mismatch"):
+        deploy.run_private_command(install)
+    assert len(calls) == count
+
+
+def test_policy_optional_pair_never_implicitly_imported(packet, tmp_path, monkeypatch):
+    args, install, _, _ = packet
+    args.rate_card = tmp_path / "never-read"
+    with pytest.raises(Error, match="together"):
+        deploy.pack(args)
+    monkeypatch.setattr(pricing, "invoke", lambda *a, **kw: pytest.fail("unexpected cluster call"))
+    install.private_action = "import-policy"
+    with pytest.raises(Error, match="independently supplied policy"):
+        deploy.run_private_command(install)
+    assert deploy.install(install)["pricing_policy"] == pricing.ABSENT
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "card-hash",
+        "registry-hash",
+        "card-name",
+        "date",
+        "budget",
+        "url-auth",
+        "price-sources",
+        "estimated",
+        "rate-limit",
+        "duplicate",
+        "credential",
+        "oversized",
+        "alias",
+    ],
+)
+def test_invalid_pricing_fails_closed(packet, tmp_path, bad):
+    args, _, _, files = packet
+    pair = reviewed_fixture(files)
+    rates = pair[pricing.CARD]
+    review = json.loads(pair[pricing.REVIEW])
+    if bad == "card-hash":
+        rates += b"\n"
+    elif bad == "registry-hash":
+        review["model_registry_sha256"] = "0" * 64
+    elif bad == "card-name":
+        review["rate_card_file"] = "other.yaml"
+    elif bad == "date":
+        review["reviewed_date"] = "2020-02-31"
+    elif bad == "budget":
+        review["approval_id"] = "0" * 64
+    elif bad == "url-auth":
+        review["pricing_sources"]["fixture-model"] = "https://fixture-secret@site.invalid/rates"
+    elif bad == "price-sources":
+        review["pricing_sources"] = {}
+    else:
+        rates = {
+            "estimated": rates.replace(b"estimated: false", b"estimated: true"),
+            "rate-limit": rates.replace(b"32768", b"1"),
+            "duplicate": rates + b"estimated: false\n",
+            "credential": rates + b"OPENAI_API_KEY: fixture-secret\n",
+            "oversized": b"x" * (pricing.POLICY_LIMIT + 1),
+            "alias": rates + b"hidden: &hidden fixture-secret\ncopy: *hidden\n",
+        }[bad]
+        review["rate_card_sha256"] = sha256(rates)
+    args.rate_card = write(tmp_path / "rates-test", rates)
+    args.provider_policy = write(tmp_path / "review-test", json_bytes(review))
+    args.output = tmp_path / "never-created.age"
+    with pytest.raises(Error) as err:
+        deploy.pack(args)
+    assert not args.output.exists() and "fixture-secret" not in str(err.value)
 
 
 def test_real_age_roundtrip(tmp_path):
@@ -403,8 +573,45 @@ def test_archive_attack_paths_and_types(name, kind):
         source_files(archive, sha256(archive))
 
 
+@pytest.mark.parametrize(
+    "kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE]
+)
+def test_reader_never_extracts_special_member_without_header_hook(monkeypatch, kind):
+    monkeypatch.setattr("scripts.release_host.private_source.check_headers", lambda raw: None)
+    monkeypatch.setattr(
+        tarfile.TarFile, "extractfile", lambda *a: pytest.fail("attempted special file read")
+    )
+    member = tarfile.TarInfo("scripts/bad")
+    member.type = kind
+    if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+        member.linkname = "scripts/target"
+    archive = tar_bytes({}, extras=[member])
+    with pytest.raises(Error, match="unsupported public archive record"):
+        source_files(archive, sha256(archive))
+
+
+@pytest.mark.parametrize(
+    "failure", [None, KeyError("private-fixture"), TypeError("private-fixture")]
+)
+def test_reader_normalizes_invalid_regular_stream(monkeypatch, failure):
+    def broken(*args):
+        if failure is not None:
+            raise failure
+        return None
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", broken)
+    archive = tar_bytes({"scripts/test": b"fixture"})
+    with pytest.raises(Error) as error:
+        source_files(archive, sha256(archive))
+    assert "private-fixture" not in str(error.value)
+
+
 def test_source_integrity_size_and_trailer(monkeypatch):
     files, _, _ = public_fixture()
+    # Gzip header followed by an invalid deflate block type.
+    malformed = bytes.fromhex("1f8b08000000000000ff07")
+    with pytest.raises(Error, match="invalid public source archive"):
+        source_files(malformed, sha256(malformed))
     archive = tar_bytes(files, compress=False) + b"hidden trailer"
     with pytest.raises(Error, match="trailer"):
         source_files(archive, sha256(archive))

@@ -25,24 +25,28 @@ from .workloads import (
 OWNER = "pmmc-release-instance"
 IAM_DIR = "/var/run/secrets/pmmc-step8-minio"
 CREDENTIAL_UID = "release.pmmc.io/credential-uid"
-RATE_ROLES = ("quote", "approve", "control")
-
-
-def policy_mount(cfg, role):
-    return cfg.get("billing", {}).get("policy_secret") and role in RATE_ROLES
+def policy_mount(cfg, role, approval):
+    return cfg.get("billing", {}).get("policy_secret") and (
+        role in ("quote", "approve") or role == "control" and bool(approval)
+    )
 
 
 def resolve_kubernetes_resources(cfg, *, roles=None):
+    return resolve_planning_resources(cfg, roles=roles)
+
+
+def resolve_planning_resources(cfg, *, roles=None, allow_cpu_fallback=False):
+    """Resolve one deployment from one snapshot; fallback is for native planning, not GPU execution."""
     from .discovery import resolve
 
-    return resolve(cfg, invoke, roles)
+    return resolve(cfg, invoke, roles, allow_cpu_fallback=allow_cpu_fallback)
 
 
 def release_env(role, cfg, name, approval, request, stage):
     env = environment(role, cfg, name, approval)
     if request and "plan" in request:
         env["PMMC_RELEASE_REQUEST"] = json.dumps(request["plan"], separators=(",", ":"))
-        env["PMMC_RELEASE_STAGE"] = stage
+        env["PMMC_RELEASE_STAGE"] = ("prepare-all" if request.get("kind")=="prepare" and role in {"models","prepare-capacity"} else stage)
         env["PMMC_RELEASE_VARIANT"] = request.get("variant", request["plan"]["variants"][0])
     if role in (*GPU_ROLES, "prepare"):
         env["PMMC_RELEASE_TOPOLOGY"] = json.dumps(native_topology(cfg), sort_keys=True)
@@ -53,7 +57,7 @@ def release_env(role, cfg, name, approval, request, stage):
     if role == "assets":
         env["PMMC_BENCHMARK_STAGING_ROOT"] = "/pmmc-stage"
     if cfg.get("billing", {}).get("policy_secret"):
-        if role in RATE_ROLES:
+        if policy_mount(cfg, role, approval):
             env["PMMC_STEP8_RATE_CARD_PATH"] = SECRET_RATE_PATH
         else:
             # Native pointer/GPU workers verify the archived card, not this Secret.
@@ -76,14 +80,14 @@ def report_subdir(run):
     return "step8/exploration/" + identifier(run) + "/reports"
 
 
-def mount_options(cfg, role, run):
+def mount_options(cfg, role, run, approval):
     if role == "assets":
         yield cfg["mounts"]["inputs"], "/pmmc-stage", False
         return
     for key, dest in TARGETS.items():
         if role == "analysis-report" and key != "outputs":
             continue
-        if key == "inputs" and policy_mount(cfg, role):
+        if key == "inputs" and policy_mount(cfg, role, approval):
             # Sibling mounts, not nested mounts inside a read-only PVC. Secret
             # files need no placeholder or mutation in operator-owned inputs.
             subtrees = {"benchmarks", *(p.removeprefix(dest + "/").split("/", 1)[0]
@@ -146,6 +150,19 @@ def receipt(role, line):
         raise ReceiptError(f"missing final JSON receipt from {role}") from exc
     if not isinstance(data, dict):
         raise ReceiptError(f"invalid {role} receipt")
+    if role in ("stop-budget","spend"):
+        if not re.fullmatch(r"[a-f0-9]{64}",str(data.get("plan_hash",""))):
+            raise ReceiptError("invalid budget audit receipt")
+        if role=="stop-budget":
+            if data.get("new_calls_stopped") is not True:
+                raise ReceiptError("new reservations have not been fenced")
+            return {k:data[k] for k in ("plan_hash","approval_id","new_calls_stopped","settled_usd","reserved_usd")}
+        ledger=data.get("ledger")
+        if ledger is not None:
+            if not isinstance(ledger,dict):
+                raise ReceiptError("invalid shared ledger")
+            ledger={k:ledger[k] for k in ("limit_usd","reserved_usd","settled_usd","unknown_reserved_usd","new_calls_stopped") if k in ledger}
+        return {k:data[k] for k in ("plan_hash","selection_hash","campaign_id")} | {"ledger":ledger}
     if role == "analysis-report":
         if (data.get("protocol") != "pmmc-analysis-readout-v2"
                 or data.get("paper_result") is not False
@@ -165,6 +182,12 @@ def receipt(role, line):
         }
         if data.get("ready") is not True or data.get("protocol") not in protocols[role]:
             raise ReceiptError(f"{role} did not report ready")
+        if role=="assets":
+            from pmmc.release_asset_receipt import validate_asset_receipt
+            try:
+                return validate_asset_receipt(data)
+            except (ValueError, OSError) as exc:
+                raise ReceiptError("assets did not verify the locked benchmark trees") from exc
         return "complete"
     if role == "prepare":
         if (
@@ -176,7 +199,7 @@ def receipt(role, line):
             or not re.fullmatch(r"[0-9a-f]{64}", data["selection_hash"])
         ):
             raise ReceiptError("invalid prepare receipt")
-        return {k: data.get(k) for k in ("run_id", "variant", "selection_hash", "release_plan_hash","selected")}
+        return {k: data.get(k) for k in ("run_id", "variant", "selection_hash", "release_plan_hash","selected","gpu_stages","plan_needs_gpu")}
     if role in {"quote", "approve"}:
         fields = ["selection_hash", "rate_card_sha256"]
         if role == "approve":
@@ -350,6 +373,10 @@ class Kubernetes:
             spec["nvidia.com/gpu"] = str(self.cfg["topology"]["gpus"])
         return {"requests": spec, "limits": spec}
 
+    def pod_identity(self):
+        return {"runAsNonRoot": True, "runAsUser": self.cfg["identity"]["uid"],
+                "runAsGroup": self.cfg["identity"]["gid"], "seccompProfile": {"type": "RuntimeDefault"}}
+
     def service_objects(self, role):
         name = f"{self.name}-{role}"
         pg = role == "postgres"
@@ -372,13 +399,16 @@ class Kubernetes:
         pod = {
             "automountServiceAccountToken": False,
             "enableServiceLinks": False,
+            "securityContext": self.pod_identity(),
             "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": name}}],
         }
         self.place(pod)
         container = {
             "name": role,
             "image": self.cfg["images"][role],
-            "env": [*self.refs(role), {"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}],
+            "env": [*self.refs(role), {"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"},
+                    {"name": "HOME", "value": "/tmp"}],
+            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
             "ports": [{"containerPort": port}],
             "resources": self.resources(role),
             "volumeMounts": [
@@ -486,10 +516,10 @@ class Kubernetes:
         digest = hashlib.sha256(json.dumps([uid, args, image, script]).encode()).hexdigest()
         name = self.name + "-layout-" + digest[:12]
         container = {
-            "name": "verify-layout",
+            "name": "create-layout",
             "image": image,
             "env": [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}],
-            "command": ["python", "-B", "-c", script, "verify", *args],
+            "command": ["python", "-B", "-c", script, "create", *args],
             "resources": self.resources("bootstrap"),
             "volumeMounts": [{"name": "shared", "mountPath": "/layout"}],
             "securityContext": {
@@ -499,18 +529,6 @@ class Kubernetes:
                 "allowPrivilegeEscalation": False,
                 "readOnlyRootFilesystem": True,
                 "capabilities": {"drop": ["ALL"]},
-            },
-        }
-        init = {
-            **container,
-            "name": "create-layout",
-            "command": ["python", "-B", "-c", script, "create", *args],
-            "securityContext": {
-                **container["securityContext"],
-                "runAsUser": 0,
-                "runAsGroup": 0,
-                "runAsNonRoot": False,
-                "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
             },
         }
         pod = {
@@ -523,7 +541,7 @@ class Kubernetes:
                     "persistentVolumeClaim": {"claimName": self.cluster["shared_pvc"]},
                 }
             ],
-            "initContainers": [init],
+            "securityContext": self.pod_identity(),
             "containers": [container],
         }
         self.place(pod, workload=True)
@@ -548,19 +566,16 @@ class Kubernetes:
             )
             check(
                 not current.get("status", {}).get("failed"),
-                "managed storage layout previously failed",
+                f"layout Job {name} failed; grant the configured UID/GID access to the dedicated "
+                "PVC paths and remove only the failed Job before retry",
             )
         seconds = self.cluster["admission_timeout_seconds"]
-        invoke(
-            [
-                *self.kube,
-                "wait",
-                "--for=condition=complete",
-                f"--timeout={seconds}s",
-                "job/" + name,
-            ],
-            timeout=seconds + 15,
-        )
+        try:
+            invoke([*self.kube, "wait", "--for=condition=complete", f"--timeout={seconds}s",
+                    "job/" + name], timeout=seconds + 15)
+        except Error as exc:
+            raise Error(f"non-root layout Job {name} did not complete; inspect admission and "
+                        "verify the PVC permits the configured UID/GID") from exc
 
     def reconcile(self):
         managed = self.cluster.get("create_shared_pvc")
@@ -646,6 +661,8 @@ class Kubernetes:
             roles
             and set(roles).intersection(("gpu", "control"))
             and (self.request or {}).get("kind") == "run"
+            and self.cfg["topology"]["gpus"] > 0
+            and ("gpu" in roles or (self.request or {}).get("stage_requires_gpu") is True)
         )
         sizing_roles = ("control", "gpu") if paired else roles
         wanted = peak(self.cfg, roles=sizing_roles, services=services)
@@ -730,7 +747,7 @@ class Kubernetes:
         return "awaiting_workload_or_pod"
 
     def manifest(self, job, role, run, stage):
-        if policy_mount(self.cfg, role) and role in ("quote", "approve"):
+        if policy_mount(self.cfg, role, self.approval) and role in ("quote", "approve"):
             check((self.request or {}).get("rate_card") == SECRET_RATE_PATH,
                   "rate-card override conflicts with the configured billing Secret")
         volumes, mounts = [], []
@@ -757,11 +774,7 @@ class Kubernetes:
         }
         pod["containers"] = [container]
         ident = self.cfg["identity"]
-        pod["securityContext"] = {
-            "runAsUser": ident["uid"],
-            "runAsGroup": ident["gid"],
-            "runAsNonRoot": True,
-        }
+        pod["securityContext"] = self.pod_identity()
         if role == "iam":
             pod["securityContext"]["fsGroup"] = ident["gid"]
             container["securityContext"]["readOnlyRootFilesystem"] = True
@@ -798,7 +811,7 @@ class Kubernetes:
                     "mountPath": dest,
                     "readOnly": readonly,
                 }
-                for source, dest, readonly in mount_options(self.cfg, role, run)
+                for source, dest, readonly in mount_options(self.cfg, role, run, self.approval)
             )
             if role == "analysis-report":
                 pod["initContainers"] = [
@@ -812,6 +825,8 @@ class Kubernetes:
                             "-c",
                             Path(__file__).with_name("volume_layout.py").read_text(),
                             "report",
+                            str(ident["uid"]),
+                            str(ident["gid"]),
                             report_subdir(run),
                         ],
                         "resources": container["resources"],
@@ -831,7 +846,7 @@ class Kubernetes:
                 container["securityContext"]["readOnlyRootFilesystem"] = True
                 volumes.append({"name": "tmp", "emptyDir": {}})
                 mounts.append({"name": "tmp", "mountPath": "/tmp"})
-        if policy_mount(self.cfg, role):
+        if policy_mount(self.cfg, role, self.approval):
             volumes.append({"name": "rates", "secret": {
                 "secretName": self.cfg["instance"] + "-rates", "defaultMode": 0o444,
                 "items": [{"key": k, "path": k} for k in RATE_FILES],
@@ -867,6 +882,8 @@ class Kubernetes:
         return obj
 
     def start(self, job, role, run, stage):
+        if role in GPU_ROLES:
+            check(self.cfg["topology"]["gpus"] > 0, "CPU-only planning allocation cannot launch a GPU Job")
         # Count active peers through ResourceQuota.used. Never charge CPU-only
         # stages for a future hypothetical GPU worker.
         self.check_quota(roles=(role,), services=role != "analysis-report")
@@ -874,7 +891,7 @@ class Kubernetes:
         for key in role_refs(role, self.cfg, self.approval, self.request).values():
             if key in (*PROVIDER, "HF_TOKEN"):
                 external_keys.setdefault(self.secret(key), set()).add(key)
-        if policy_mount(self.cfg, role):
+        if policy_mount(self.cfg, role, self.approval):
             external_keys[self.cfg["instance"] + "-rates"] = set(RATE_FILES)
         for external, required in external_keys.items():
             keys = invoke(

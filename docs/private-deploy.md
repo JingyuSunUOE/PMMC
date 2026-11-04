@@ -3,7 +3,7 @@
 One binary age ciphertext contains the original **public release tarball bytes**,
 the original reviewed external image lock, a derived asset lock binding the
 source tarball/manifest and image/model/benchmark locks, validated deployment
-settings, and only the explicitly selected credential fields. No checkout
+settings, optional reviewed pricing files, and only the explicitly selected credential fields. No checkout
 scan, ambient dotenv lookup, model weights, benchmark data, workload state,
 database backup, registry credentials, identity, or private recovery tree.
 This is not a backup or a budget approval.
@@ -87,6 +87,38 @@ Use the original archive as the pristine source build context. Set
 PMMC_IMAGE_LOCK_SHA256 to the independently verified digest for the launcher.
 
 ## Use Private Settings
+
+### Optional Pricing Pair
+
+For an empty inputs PVC, supply **both** `--rate-card "$REVIEWED_CARD"` and
+`--provider-policy "$REVIEWED_POLICY"` to `private pack`. Both files must be
+owner-only, at most 64 KiB each. This option needs PyYAML on the host. Pack
+preserves the exact reviewed bytes; it does not generate, reprice, or approve
+anything. Use a comment-free YAML card with explicit non-estimated prices
+and limits, and a `pmmc-release-rate-review-v1` JSON review for the mounted
+basename `rate-card.yaml`. Its card and frozen registry SHA-256 values must
+match; each priced model needs a credential-free HTTPS pricing source (no
+query or fragment). Do not put credentials in reviewer names, scopes, or URLs.
+Remove comments *before* review, never after calculating its card checksum.
+
+The encrypted configuration opts into `billing.policy_secret = true` and the
+canonical card path; it leaves budget preferences and approvals alone. Ordinary
+install does not write either file in plaintext or change the cluster. After
+install, using the same authenticated pins and external identity:
+
+~~~sh
+python3 -B -m scripts.release_host.private_deploy private import-policy "$@"
+~~~
+
+This creates or verifies one immutable Opaque Secret, `<instance>-rates`, with
+only `rate-card.yaml` and `provider-policy.json`. Mount each key read-only via
+`subPath` at `/pmmc-inputs/<key>`; do not mount over the whole inputs PVC.
+Exact matches are unchanged; a mutable, changed, or extra-key Secret is
+refused, never replaced. The importer needs only named get and namespace create,
+not patch or delete. If the pair is omitted, paid work awaits an independently
+supplied reviewed policy. Import does not quote, authorize spending, or start a job.
+
+### Launcher Handoff
 
 The installer does **not** leave a decrypted TOML, dotenv or Secret YAML.
 To pass just validated TOML to a trusted launcher via stdin, use a dedicated

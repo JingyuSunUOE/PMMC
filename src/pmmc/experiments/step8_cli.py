@@ -351,9 +351,12 @@ def spend_exploration_command(
 
 @app.command("stop-exploration-budget")
 def stop_exploration_budget_command(
-    run_id: str = typer.Option(...), approval_id: str = typer.Option(...),
-    plan_hash: str = typer.Option(...), selection_hash: str = typer.Option(...),
-    operator_id: str = typer.Option(...), reason_code: str = typer.Option(...),
+    run_id: str = typer.Option(...),
+    approval_id: str = typer.Option(...),
+    plan_hash: str = typer.Option(...),
+    selection_hash: str = typer.Option(...),
+    operator_id: str = typer.Option(...),
+    reason_code: str = typer.Option(...),
     variant: Literal["wr", "w", "r", "legacy"] = typer.Option("wr"),
 ) -> None:
     """Permanently fence new reservations on one approved plan; never erase an existing hold."""
@@ -362,9 +365,17 @@ def stop_exploration_budget_command(
 
     settings = get_settings()
     directory = exploration_campaign_directory(settings, run_id, variant=variant)
-    result = asyncio.run(stop_release_budget(settings, directory, approval_id=approval_id,
-                         expected_plan_hash=plan_hash, selection_hash=selection_hash,
-                         operator_id=operator_id, reason_code=reason_code))
+    result = asyncio.run(
+        stop_release_budget(
+            settings,
+            directory,
+            approval_id=approval_id,
+            expected_plan_hash=plan_hash,
+            selection_hash=selection_hash,
+            operator_id=operator_id,
+            reason_code=reason_code,
+        )
+    )
     typer.echo(json.dumps(result, sort_keys=True))
 
 

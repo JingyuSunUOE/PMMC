@@ -564,9 +564,9 @@ def facade_fixture(monkeypatch, cells, gold=QueryGold(answer="May"), *, memories
     )
     settings.model_copy = lambda **kwargs: settings
 
-    def run(*, campaign_id="campaign", source_run_id="run", suite_id="suite", **kwargs):
+    def run(**kwargs):
         return asyncio.run(
-            workflow.evaluate_step8_query(settings, campaign_id, source_run_id, suite_id, query.query_id, **kwargs)
+            workflow.evaluate_step8_query(settings, "campaign", "run", "suite", query.query_id, **kwargs)
         )
 
     return SimpleNamespace(

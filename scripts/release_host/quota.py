@@ -18,6 +18,8 @@ DEFAULTS = {
     "pointer": (1, 1),
     "quote": (4, 16),
     "approve": (4, 16),
+    "stop-budget": (1, 2),
+    "spend": (1, 2),
 }
 
 

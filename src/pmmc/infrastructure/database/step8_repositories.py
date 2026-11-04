@@ -63,6 +63,14 @@ def validate_budget_policy(limit: Decimal | None, uncapped: bool) -> None:
         raise ValueError("explicit positive finite NUMERIC(20,8) limit required")
 
 
+def plan_budget_identity(*, campaign_id: str, selection_hash: str, approver_id: str,
+                         rate_card_hash: str, limit_usd: Decimal | None, plan_hash: str,
+                         plan_bindings: dict) -> dict[str, Any]:
+    return dict(campaign_id=campaign_id, selection_hash=selection_hash, approver_id=approver_id,
+                rate_card_hash=rate_card_hash, plan_hash=plan_hash, plan_bindings=plan_bindings,
+                limit_usd=format(limit_usd.normalize(), "f") if limit_usd is not None else None)
+
+
 def require_budget_binding(
     row: Any, *, campaign_id: str, selection_hash: str,
     plan_hash: str | None, scope_hash: str | None,
@@ -491,9 +499,10 @@ class PostgresBenchmarkRepository:
                 members.add((member["campaign_id"], member["selection_hash"]))
             if (campaign_id, selection_hash) not in members or len(members) != len(plan_bindings):
                 raise ValueError("ambiguous plan budget bindings")
-            identity.update(plan_hash=plan_hash, plan_bindings=plan_bindings)
-            if limit_usd is not None:
-                identity["limit_usd"] = format(limit_usd.normalize(), "f")
+            assert plan_hash is not None
+            identity = plan_budget_identity(campaign_id=campaign_id, selection_hash=selection_hash,
+                approver_id=approver_id, rate_card_hash=rate_card_hash, limit_usd=limit_usd,
+                plan_hash=plan_hash, plan_bindings=plan_bindings)
         approval_id = canonical_content_hash(identity)
         async with self.sessions.begin() as session:
             if plan_bindings:

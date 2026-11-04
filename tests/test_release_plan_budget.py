@@ -329,7 +329,10 @@ def budget_children(tmp_path, plan):
                 if plan["stage"] == "all" and arm == "wr"
                 else ("main",)
             ),
-            scientific_inputs={"query": "q0"},
+            scientific_inputs={
+                "query": "q0",
+                "model_entry_hashes": {GPT: fixture.protocol.model_entry_hashes[GPT]},
+            },
             parameters={"dataset": "memlens", "answer_model": GPT, "readout": "primary"},
         )
         payload = job.model_dump(mode="json")

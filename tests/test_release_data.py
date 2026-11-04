@@ -80,15 +80,35 @@ def test_gallery_inventory_checked_before_payload_download():
         data._gallery_files(spec, {"sha": spec["hf_revision"], "siblings": []})
 
 
+def test_read_only_analysis_rejects_preparation_before_data_access(tmp_path, monkeypatch):
+    from pmmc.experiments import release_assets, release_inputs
+    from pmmc.infrastructure.settings import Settings
+    from pmmc.release_plan import normalize_plan
+
+    plan = normalize_plan(dict(run_id="read-only", stage="analysis", analyses=["coverage"]))
+    monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps(plan))
+    monkeypatch.setenv("PMMC_BENCHMARK_STAGING_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        release_assets, "prepare_data", lambda *a, **kw: pytest.fail("unexpected data job")
+    )
+    with pytest.raises(SystemExit):
+        release_assets.main()
+    with pytest.raises(ValueError, match="without_deps"):
+        release_inputs.prepare_exploration(
+            Settings(_env_file=None, project_root=tmp_path), "read-only"
+        )
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("dataset", ["memgallery", "memlens"])
 def test_assets_workload_from_empty_volume_without_services(dataset, tmp_path, monkeypatch, capsys):
     """Exercise the actual host command, mount, request and receipt with synthetic Hub bytes."""
-    from functools import partial
     from importlib import import_module
 
     from scripts.release_host.backends import mount_options, receipt, release_env, role_refs
     from scripts.release_host.workloads import command
 
+    from pmmc import release_asset_receipt
     from pmmc.release_plan import normalize_plan, plan_hash
 
     raw, lock = _fixture(tmp_path)
@@ -144,7 +164,8 @@ def test_assets_workload_from_empty_volume_without_services(dataset, tmp_path, m
     argv = command("assets", cfg, "fixture", "main", req)
     assert argv[:2] == ["python", "-m"]
     entry = import_module(argv[2])
-    assert list(mount_options(cfg, "assets", "fixture")) == [(str(root), "/pmmc-stage", False)]
+    mounts = list(mount_options(cfg, "assets", "fixture", approval=None))
+    assert mounts == [(str(root), "/pmmc-stage", False)]
     assert role_refs("assets", cfg, None, req) == {}
     env = release_env("assets", cfg, "test", None, req, "main")
     assert env["PMMC_BENCHMARK_STAGING_ROOT"] == "/pmmc-stage"
@@ -152,7 +173,8 @@ def test_assets_workload_from_empty_volume_without_services(dataset, tmp_path, m
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("PMMC_BENCHMARK_STAGING_ROOT", str(root))
-    monkeypatch.setattr(entry, "prepare_data", partial(data.prepare_data, lock_path=lock))
+    monkeypatch.setattr(entry, "SOURCE_LOCK", lock)
+    monkeypatch.setattr(release_asset_receipt, "SOURCE_LOCK", lock)
     calls = []
 
     def fetch(url, *, timeout):
@@ -163,11 +185,30 @@ def test_assets_workload_from_empty_volume_without_services(dataset, tmp_path, m
     for state in ("installed", "verified"):
         entry.main()
         final = capsys.readouterr().out.strip().splitlines()[-1]
-        assert receipt("assets", final) == "complete"
+        assert receipt("assets", final)["benchmarks"] == [dataset]
         report = json.loads(final)
         assert report["plan_hash"] == plan_hash(plan)
+        assert release_asset_receipt.validate_asset_receipt(report, plan)["file_counts"] == {
+            dataset: 1
+        }
+        with pytest.raises(ValueError, match="request_mismatch"):
+            release_asset_receipt.validate_asset_receipt(report, {**plan, "run_id": "other"})
+        with pytest.raises(ValueError, match="locked_tree_mismatch"):
+            release_asset_receipt.validate_asset_receipt(
+                {**report, "file_counts": {dataset: 2}}, plan
+            )
+        other = "memlens" if dataset == "memgallery" else "memgallery"
+        forged_plan = {**plan, "benchmarks": [other]}
+        with pytest.raises(ValueError, match="request_mismatch"):
+            release_asset_receipt.validate_asset_receipt(
+                {**report, "plan_hash": plan_hash(forged_plan)}, forged_plan
+            )
         selected = report["sources"]["benchmarks"]
         assert set(selected) == {dataset} and selected[dataset]["state"] == state
+        forged = json.loads(final)
+        forged["sources"]["benchmarks"][dataset]["files"] = forged["file_counts"][dataset] = 9
+        with pytest.raises(ValueError, match="locked_tree_mismatch"):
+            release_asset_receipt.validate_asset_receipt(forged, plan)
     assert sorted(calls) == sorted(routes)
 
 

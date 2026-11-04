@@ -51,6 +51,9 @@ credentials, local model files or untracked state are copied from the host.
 The archive root is the project root. Verify the downloaded archive's checksum
 **before** extracting, and run `python3 -B docker/verify_public_source.py .`
 in the pristine extraction **before** adding external assets.
+Ordinary CI exports both contexts through BuildKit using only `FROM scratch`
+and `COPY . /`. It verifies the app against the source manifest and checks
+the exact four IAM files against the extracted source before any CUDA build.
 
 ## Candidate publication
 
@@ -58,14 +61,24 @@ in the pristine extraction **before** adding external assets.
    `release-check.yml` on that branch with `publish_images=true`. The existing
    workflow path must be registered on the default branch. Push and PR events
    only run read-only checks. The `runtime_image=true` dispatch can exercise
-   both cold builds without pushing.
+   both cold builds in a separate read-only job without registry or OIDC
+   write permissions. Only explicit publication gets `packages: write`,
+   `attestations: write`, and `id-token: write`; it has no source-write scope.
 2. The workflow verifies the public source archive and requires the real Kind
    test: separate bound RWO claims, a PG16 pgvector row and an S3 object, both
    pods gone and recreated, both original PV bindings and marker values intact.
-   It then builds the Linux/amd64 app, runs offline scientific tests with no
+   The ledger test then creates a short-lived login and database on that
+   restored PostgreSQL pod. It exercises the actual migration and concurrent
+   budget reservations over loopback, with no existing database URL or operator
+   credentials. The cluster is deleted even if this test fails.
+   The workflow then builds the Linux/amd64 app, runs offline scientific tests with no
    network, publishes it, and builds IAM with that digest in a separate
-   `docker/minio` context. Candidate tags are run-specific; only digest
-   references enter the lock. No source file requires an image's future digest.
+   `docker/minio` context. The app checks every file in SOURCE.sha256 after COPY;
+   IAM compares the independently copied entrypoint with the copy in its app
+   base. Candidate tags are run-specific. The publisher compares the Docker push
+   receipt to raw GHCR manifest bytes fetched by **both tag and digest**, checks
+   the revision/source labels and Linux/amd64 platform, and uses only the digest
+   in the lock. No source file requires an image's future digest.
 3. Download artifact `release-candidate-<40-hex-commit>` from the passing run.
    It contains `source.tar.gz`, `images.lock.json` and `SHA256SUMS`. Verify the
    attestations on **both** assets against the reviewed repository, workflow
@@ -92,6 +105,36 @@ sha256sum -c SHA256SUMS
    lock at the path above, and export `PMMC_IMAGE_LOCK_SHA256` before launch.
    For air-gapped sites, transfer the verified bytes and mirror images without
    changing their manifest digests. Rebuilding locally is not mirroring.
+
+### GHCR release gate
+
+An authenticated push or inspect in Actions does **not** prove anonymous
+readability. Both packages must independently permit public pulls. New GHCR
+packages default to private; a pre-existing package may need to grant the
+publishing repository Write under **Manage Actions access**. A workflow token
+cannot override that policy. See [GitHub Container registry permissions](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+After verifying the attestations above and before tagging, run this from the
+directory containing the attested lock on a clean machine with room for both
+images. The first check compares the top-level manifest bytes to the locked
+digest. The second actually downloads the Linux/amd64 layers; it does not just
+test registry metadata or reuse a previously authenticated Docker daemon.
+
+```sh
+set -eu
+proof=$(mktemp -d)
+for role in app iam; do
+  ref=$(jq -er --arg role "$role" '.images[$role]' images.lock.json)
+  skopeo inspect --no-creds --raw "docker://$ref" > "$proof/$role.manifest"
+  printf '%s  %s\n' "${ref##*@sha256:}" "$proof/$role.manifest" | sha256sum -c -
+  skopeo --override-os linux --override-arch amd64 copy --src-no-creds \
+    "docker://$ref" "dir:$proof/$role"
+done
+```
+
+On denial, the parent checks each package's visibility and Actions access.
+Retry the **same attested digests** after changing visibility. Do not issue a
+new lock or substitute a mutable tag to make an anonymous pull pass.
 
 ## Upstream receipts
 

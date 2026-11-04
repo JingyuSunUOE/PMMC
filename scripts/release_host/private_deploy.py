@@ -1,4 +1,4 @@
-"""Private age release envelope. Stdlib host tool; no extraction of arbitrary members."""
+"""Private age release envelope; no extraction of arbitrary members."""
 
 import argparse
 import base64
@@ -28,11 +28,22 @@ from .private_io import (
     trusted_parent,
     write_new,
 )
+from .private_policy import (
+    ABSENT,
+    CARD,
+    POLICY_KEYS,
+    POLICY_LIMIT,
+    RATE_PATH,
+    REVIEW,
+    import_policy,
+    validate_policy,
+)
 from .private_secrets import ROLE_KEYS, present_roles, read_dotenv, select_roles, validate_values
 from .private_source import IMAGE_LOCK, SOURCE_LIMIT, source_files
 from .secrets import import_for_config, import_secrets
 
 FORMAT = "pmmc-private-age-v1"
+POLICY_FORMAT = "pmmc-private-age-v2"
 MAX_ENVELOPE = 36 << 20
 CONFIG_LIMIT = 64 << 10
 IMAGES_LIMIT = 16384
@@ -69,10 +80,13 @@ def parse_config(raw):
         raise Error("invalid private deployment TOML") from None
 
 
-def config_bytes(raw, images):
+def config_bytes(raw, images, *, with_policy=False):
     # Serialize only validated settings, not comments or incidental private text.
     original = parse_config(raw)
     original["images"] = images
+    if with_policy:
+        original.setdefault("native", {})["rate_card"] = RATE_PATH
+        original.setdefault("billing", {})["policy_secret"] = True
     lines = []
 
     def name(key):
@@ -82,7 +96,11 @@ def config_bytes(raw, images):
         if isinstance(value, list):
             return "[" + ", ".join(literal(v) for v in value) + "]"
         if isinstance(value, dict):
-            return "{ " + ", ".join(name(k) + " = " + literal(v) for k, v in sorted(value.items())) + " }"
+            return (
+                "{ "
+                + ", ".join(name(k) + " = " + literal(v) for k, v in sorted(value.items()))
+                + " }"
+            )
         check(type(value) in (int, bool, str), "unsupported private configuration value")
         return json_bytes(value).decode()
 
@@ -211,24 +229,42 @@ def check_roles(cfg, roles):
 
 def pack(args):
     recipient = recipient_key(args.recipient)
+    card, review = getattr(args, "rate_card", None), getattr(args, "provider_policy", None)
+    check((card is None) == (review is None), "provide --rate-card and --provider-policy together")
     archive = read_file(args.source_archive, SOURCE_LIMIT)
     images = read_file(args.images_lock, IMAGES_LIMIT)
     config = read_file(args.config, CONFIG_LIMIT, private=True)
-    _, cfg, assets = release_inputs(archive, args.source_sha256, images, args.images_sha256, config)
-    config = config_bytes(config, cfg["images"])
+    files, cfg, assets = release_inputs(
+        archive, args.source_sha256, images, args.images_sha256, config
+    )
+    pair = None
+    if card is not None:
+        check(
+            cfg["native"].setdefault("rate_card", RATE_PATH) == RATE_PATH,
+            "bundled rate card requires " + RATE_PATH,
+        )
+        cfg["billing"]["policy_secret"] = True
+        pair = {
+            CARD: read_file(card, POLICY_LIMIT, private=True),
+            REVIEW: read_file(review, POLICY_LIMIT, private=True),
+        }
+        validate_policy(pair, cfg, files)
+    config = config_bytes(config, cfg["images"], with_policy=pair is not None)
     check(len(config) <= CONFIG_LIMIT, "canonical configuration exceeds size limit")
     roles = args.role or []
     check_roles(cfg, roles)
     check(bool(args.dotenv) == bool(roles), "select dotenv input and credential roles together")
     values = read_dotenv(args.dotenv, roles) if roles else {}
     envelope = {
-        "format": FORMAT,
+        "format": POLICY_FORMAT if pair is not None else FORMAT,
         "source_archive": blob(archive),
         "images_lock": blob(images),
         "assets_lock": blob(json_bytes(assets)),
         "private_config": blob(config),
         "credentials": values,
     }
+    if pair is not None:
+        envelope["pricing_policy"] = {k: blob(v) for k, v in pair.items()}
     plain = json_bytes(envelope)
     check(len(plain) <= MAX_ENVELOPE, "private envelope exceeds size limit")
     encrypted = invoke(["age", "--encrypt", "--recipient", recipient], plain)
@@ -238,6 +274,7 @@ def pack(args):
         "bundle_sha256": sha256(encrypted),
         "source_sha256": args.source_sha256,
         "images_sha256": args.images_sha256,
+        "pricing_policy": "bundled; explicit import required" if pair is not None else ABSENT,
     }
 
 
@@ -251,6 +288,7 @@ class Opened:
     cfg: dict
     toml: bytes
     values: dict
+    policy: dict | None
 
 
 def decrypt(args):
@@ -267,17 +305,21 @@ def decrypt(args):
         os.close(fd)
     check(len(plain) <= MAX_ENVELOPE, "private envelope exceeds size limit")
     obj = json_object(plain)
+    has_policy = obj.get("format") == POLICY_FORMAT
     check(
         obj.keys()
-        == {
-            "format",
-            "source_archive",
-            "images_lock",
-            "assets_lock",
-            "private_config",
-            "credentials",
-        }
-        and obj["format"] == FORMAT,
+        == (
+            {
+                "format",
+                "source_archive",
+                "images_lock",
+                "assets_lock",
+                "private_config",
+                "credentials",
+            }
+            | ({"pricing_policy"} if has_policy else set())
+        )
+        and obj["format"] in (FORMAT, POLICY_FORMAT),
         "unknown private envelope structure",
     )
     archive = unblob(obj["source_archive"], SOURCE_LIMIT)
@@ -297,7 +339,16 @@ def decrypt(args):
     if values:
         validate_values(values, roles)
     check(config == config_bytes(config, cfg["images"]), "noncanonical private configuration")
-    return Opened(cipher, archive, images, files, assets, cfg, config, values)
+    policy = None
+    if has_policy:
+        blobs = obj["pricing_policy"]
+        check(
+            isinstance(blobs, dict) and blobs.keys() == POLICY_KEYS,
+            "unexpected pricing policy fields",
+        )
+        policy = {key: unblob(value, POLICY_LIMIT) for key, value in blobs.items()}
+        validate_policy(policy, cfg, files)
+    return Opened(cipher, archive, images, files, assets, cfg, config, values, policy)
 
 
 def select_import(opened, roles):
@@ -349,6 +400,9 @@ def install(args):
         "public_files_verified": len(opened.files),
         "source_sha256": opened.assets["source_sha256"],
         "images_sha256": opened.assets["images_sha256"],
+        "pricing_policy": "bundled; explicit import required"
+        if opened.policy is not None
+        else ABSENT,
     }
     if roles:
         result["secrets"] = import_for_config(opened.cfg, values, roles, rotate=args.rotate)
@@ -372,7 +426,11 @@ def add_private_commands(subparsers):
         build.add_argument("--" + flag, required=True)
     build.add_argument("--dotenv", "--env-file", help="explicit private file or - for stdin")
     build.add_argument("--role", action="append", choices=ROLE_KEYS)
-    for verb in ("install", "import", "config"):
+    build.add_argument(
+        "--rate-card", help="private reviewed pricing YAML; requires --provider-policy"
+    )
+    build.add_argument("--provider-policy", help="private matching pricing review JSON")
+    for verb in ("install", "import", "import-policy", "config"):
         command = group.add_parser(verb)
         command.set_defaults(private_action="bundle-import" if verb == "import" else verb)
         for flag in ("bundle", "bundle-sha256", "source-sha256", "images-sha256", "identity"):
@@ -408,6 +466,9 @@ def run_private_command(args):
         return pack(args)
     if args.private_action == "install":
         return install(args)
+    if args.private_action == "import-policy":
+        opened = decrypt(args)
+        return import_policy(opened.cfg, opened.policy)
     if args.private_action == "bundle-import":
         opened = decrypt(args)
         return import_for_config(

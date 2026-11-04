@@ -282,7 +282,7 @@ def test_release_budget_migration_and_concurrent_workers(tmp_path):
                     for result in results
                 )
                 await repo.settle(f"call{successes[0]}", None, None)
-                stopped = await repo.stop_plan_budget(
+                stop = dict(
                     approval_id=approval,
                     plan_hash="b" * 64,
                     campaign_id="w",
@@ -290,6 +290,18 @@ def test_release_budget_migration_and_concurrent_workers(tmp_path):
                     operator_id="ci",
                     reason_code="operator_stop",
                 )
+                with pytest.raises(ValueError, match="selection_mismatch"):
+                    await repo.stop_plan_budget(**{**stop, "selection_hash": "0" * 64})
+                first, stopped, last = await asyncio.gather(
+                    reserve(90), repo.stop_plan_budget(**stop), reserve(91),
+                    return_exceptions=True,
+                )
+                for i, result in ((90, first), (91, last)):
+                    if result == "reserved":
+                        successes.append(i)
+                    else:
+                        assert isinstance(result, BudgetExceededError)
+                assert isinstance(stopped, dict)
                 assert stopped["stop_reason"] == (
                     "operator_stop" if limit is None else "approved_api_budget_exhausted"
                 )
@@ -305,6 +317,7 @@ def test_release_budget_migration_and_concurrent_workers(tmp_path):
                     and snapshot["settled_usd"] == 1
                 )
                 assert any(r["state"] == "unknown" for r in calls)
+                assert all(r["created_at"] <= snapshot["stopped_at"] for r in calls)
             finally:
                 await engine.dispose()
 

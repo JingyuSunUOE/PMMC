@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pmmc.release_plan import normalize_plan, plan_hash
 
-from .backends import Kueue, ReceiptError, resolve_kubernetes_resources
+from .backends import Kueue, ReceiptError, resolve_planning_resources
 from .config import ROOT, SUITE, Error, check, identifier
 from .workloads import credentials
 
@@ -182,7 +182,7 @@ def collect_batch(folder, state, backend, name, *, sleep=time.sleep):
         tag = digest([state["run"], state["task"], state["attempt"]])[:12]
         batch = state["batch"] = {
             role: {"job": f"{name}-{tag}-{role}", "state": "planned", "submitted": False}
-            for role in groups(state["request"]["kind"])[state["index"]]
+            for role in task_groups(state)[state["index"]]
         }
         save(folder, state, "intent")
     since = time.monotonic()
@@ -219,14 +219,39 @@ def collect_batch(folder, state, backend, name, *, sleep=time.sleep):
             if actual == "complete":
                 try:
                     actual = backend.outcome(job, role)
-                    if role == "prepare":
+                    if role == "assets":
+                        plan = state["request"]["plan"]
+                        if actual["plan_hash"] != state["plan_hash"] or set(
+                            actual["benchmarks"]
+                        ) != set(plan["benchmarks"]):
+                            raise ReceiptError("asset receipt scope mismatch")
+                        info["receipt"] = actual
+                        actual = "complete"
+                    elif role == "prepare":
                         if (
                             actual["run_id"] != state["run"]
                             or actual["variant"] != state["request"]["variant"]
+                            or actual["release_plan_hash"] != state["plan_hash"]
+                            or set(actual["selected"] or {})
+                            != set(state["request"]["plan"]["benchmarks"])
+                            or not isinstance(actual["gpu_stages"], list)
+                            or not set(actual["gpu_stages"]) <= {"main", "analysis", "baselines"}
                         ):
                             raise ReceiptError("native pointer run or variant mismatch")
                         info["receipt"] = actual
                         state.setdefault("prepared", {})[actual["variant"]] = actual
+                        if (
+                            state["request"]["kind"] in ("run", "prepare")
+                            and backend.cfg["topology"]["gpus"] == 0
+                            and (
+                                actual.get("plan_needs_gpu")
+                                if state["request"]["kind"] == "prepare"
+                                else state["stage"] in actual["gpu_stages"]
+                            )
+                        ):
+                            raise ReceiptError(
+                                "selected native work requires an available GPU topology"
+                            )
                         actual = "complete"
                     elif role == "analysis-report":
                         if actual["plan_hash"] != state["plan_hash"]:
@@ -235,6 +260,13 @@ def collect_batch(folder, state, backend, name, *, sleep=time.sleep):
                         actual = "complete"
                     elif role in ("approve", "quote"):
                         req = state["request"]
+                        if actual.get("plan_hash") != state["plan_hash"]:
+                            raise ReceiptError("budget receipt plan mismatch")
+                        if (
+                            actual["selection_hash"]
+                            != state["prepared"][req["variant"]]["selection_hash"]
+                        ):
+                            raise ReceiptError("budget receipt selection mismatch")
                         if role == "approve" and (
                             actual["selection_hash"] != req["selection_hash"]
                             or actual.get("plan_hash") != state["plan_hash"]
@@ -320,8 +352,28 @@ def units(plan):
     return [*result, "source-analysis", "wr-baselines"]
 
 
+def task_groups(state):
+    req = state["request"]
+    rows = groups(req["kind"])
+    prepared = state.get("prepared", {}).get(req["variant"])
+    if not prepared or req["kind"] not in ("run", "prepare"):
+        return rows
+    gpu = (
+        prepared.get("plan_needs_gpu", True)
+        if req["kind"] == "prepare"
+        else state["stage"] in prepared["gpu_stages"]
+    )
+    if gpu:
+        return rows
+    return [
+        [r for r in row if r not in ("gpu", "prepare-capacity")]
+        for row in rows
+        if row != ["prepare-capacity"]
+    ]
+
+
 def execute(folder, state, backend, *, sleep=time.sleep):
-    while state["index"] < len(groups(state["request"]["kind"])):
+    while state["index"] < len(task_groups(state)):
         result = collect_batch(folder, state, backend, state["deployment"], sleep=sleep)
         if result != "complete":
             state["status"] = result
@@ -386,8 +438,10 @@ def launch(root, cfg, run, plan, *, action=None, resume=False, factory=None, sle
             )
             cfg = stored
         elif factory is None:
-            cfg = resolve_kubernetes_resources(
-                cfg, roles=planned_roles(plan, (action or {}).get("kind", "run"))
+            cfg = resolve_planning_resources(
+                cfg,
+                roles=planned_roles(plan, (action or {}).get("kind", "run")),
+                allow_cpu_fallback=bool(plan["components"]),
             )
         active = private / "active.json"
         check(

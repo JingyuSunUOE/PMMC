@@ -42,7 +42,7 @@ def seal_report(directory, stage, metrics, report):
         "scope_total": report.get("scoped_jobs"),
     }
     obs_sha = hashlib.sha256(json_bytes(observation)).hexdigest()
-    write_json(root/"observations"/stage/(obs_sha+".json"),observation,immutable=True)
+    write_json(root / "observations" / stage / (obs_sha + ".json"), observation, immutable=True)
     # A selection ledger can change after a later stage; never sum these cumulative observations.
     if "selection_ledger" in metrics:
         write_json(
@@ -107,6 +107,23 @@ def _read(settings, run, arm, stage):
     if not seal_path.exists():
         return None
     seal = json.loads(read(seal_path))
+    from .release_scope import verified_scope_payload
+
+    scope_hash = seal.get("scope_hash")
+    if (
+        seal.get("protocol") != "pmmc-scoped-readout-v2"
+        or seal.get("stage") != stage
+        or not isinstance(scope_hash, str)
+        or len(scope_hash) != 64
+        or any(c not in "0123456789abcdef" for c in scope_hash)
+    ):
+        raise ValueError("invalid source seal scope")
+    scope_file = directory / "private/scopes" / f"{scope_hash}.json"
+    if not scope_file.is_file() or json.loads(read(scope_file))["stage"] != stage:
+        raise ValueError("source seal does not identify the requested stage")
+    scope = verified_scope_payload(directory, scope_hash, campaign.campaign_id, h)
+    if scope["stage"] != stage or scope["paid"] is not True:
+        raise ValueError("source seal does not identify the requested stage")
     digest = seal["sha256"]
     if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError("invalid readout digest")
@@ -158,14 +175,17 @@ def _read(settings, run, arm, stage):
             for ds, ids in sel.query_ids.items()
         },
     )
-    observations=[]
-    for path in sorted((root/"observations"/stage).glob("*.json")):
-        raw_obs=read(path)
-        obs=json.loads(raw_obs)
-        if hashlib.sha256(raw_obs).hexdigest()!=path.stem or obs["scope_hash"]!=seal["scope_hash"]:
+    observations = []
+    for path in sorted((root / "observations" / stage).glob("*.json")):
+        raw_obs = read(path)
+        obs = json.loads(raw_obs)
+        if (
+            hashlib.sha256(raw_obs).hexdigest() != path.stem
+            or obs["scope_hash"] != seal["scope_hash"]
+        ):
             raise ValueError("timing observation does not identify the sealed scope")
         observations.append(obs)
-    return {**data,"invocations":observations}, identity, ledger
+    return {**data, "invocations": observations}, identity, ledger
 
 
 def run_analysis(settings, raw_plan):
@@ -237,7 +257,7 @@ def run_analysis(settings, raw_plan):
                     source=x[1],
                     selection_ledger=x[2],
                     wall_seconds=x[0].get("timing_seconds"),
-                    measured_invocations=x[0].get("invocations",[]),
+                    measured_invocations=x[0].get("invocations", []),
                     note="Concurrent invocation times and cumulative ledgers are not additive. Null is unmeasured.",
                 )
                 for x in found.values()

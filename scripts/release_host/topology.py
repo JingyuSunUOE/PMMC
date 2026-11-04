@@ -51,8 +51,6 @@ def normalize(cfg, overrides, *, roles=None):
             capacity[key] = max(value, capacity[key])
         check(value <= capacity[key], f"{key} exceeds declared single-node capacity")
     count = totals["gpus"]
-    if roles is None and count == 0:
-        roles = {"analysis-report"}
     tp = overrides.get("answer_tp", r.get("answer_tp", "auto"))
     if tp == "auto":
         tp = 2 if count >= 2 and count % 2 == 0 else 1
@@ -73,15 +71,22 @@ def normalize(cfg, overrides, *, roles=None):
                 reserved.append("control")
             free = totals[total] - sum(r[s][key] for s in reserved)
             auto = free if role in GPU_ROLES else min(default, free)
-            active = roles is None or role in roles
+            active = roles is not None and role in roles
             val = spec.setdefault(key, auto if active else max(1, auto))
             check(
-                type(val) is int and val > 0 and (not active or val <= free),
+                type(val) is int
+                and 0 < val
+                and (roles is not None or val <= totals[total])
+                and (not active or val <= free),
                 f"insufficient {key} budget for {role}",
             )
-    if count and (roles is None or set(GPU_ROLES).intersection(roles)):
+    if roles is None:
+        # The phase is not known at offline config-load time. Do not require
+        # capacity for PostgreSQL, MinIO or a GPU to plan a one-CPU report.
+        return
+    if count and set(GPU_ROLES).intersection(roles):
         check(
-            all(r[s]["cpu"] >= count for s in GPU_ROLES if roles is None or s in roles),
+            all(r[s]["cpu"] >= count for s in GPU_ROLES if s in roles),
             "insufficient GPU pod CPUs for the requested replica pool",
         )
     usage = peak(cfg, paid_workers=bool(count), roles=roles, services=roles != {"analysis-report"})

@@ -183,12 +183,10 @@ def publish_scope(directory: Path, campaign_id: str, selection_hash: str, stage:
     return digest, selected
 
 
-def read_scope(directory: Path, digest: str, campaign_id: str, selection_hash: str):
+def verified_scope_payload(directory: Path, digest: str, campaign_id: str, selection_hash: str):
+    """Authenticate a recorded scope as evidence, without admitting work."""
     import json
-    import os
     import re
-
-    from pmmc.release_plan import plan_from_environment, plan_hash as hash_plan
 
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("invalid_exploration_scope_hash")
@@ -199,6 +197,17 @@ def read_scope(directory: Path, digest: str, campaign_id: str, selection_hash: s
     plan_hash = _plan_identity(directory, campaign_id, selection_hash)
     if plan_hash != payload.get("release_plan_hash"):
         raise ValueError("release_worker_request_identity_mismatch")
+    if plan_hash is not None:
+        _check_frozen_scope(directory, payload, digest)
+    return payload
+
+
+def read_scope(directory: Path, digest: str, campaign_id: str, selection_hash: str):
+    import os
+    from pmmc.release_plan import plan_from_environment, plan_hash as hash_plan
+
+    payload = verified_scope_payload(directory, digest, campaign_id, selection_hash)
+    plan_hash = payload.get("release_plan_hash")
     # Compare host intent before a paid worker exports its native recipe to descendants.
     if payload["paid"]:
         host = plan_from_environment(os.environ)
@@ -210,8 +219,6 @@ def read_scope(directory: Path, digest: str, campaign_id: str, selection_hash: s
             config = Step8BenchmarkConfig.model_validate_json((directory / "manifests/config.json").read_bytes())
             if arm != config.metadata.get("exploration_variant"):
                 raise ValueError("release_worker_paid_host_variant_mismatch")
-    if plan_hash is not None:
-        _check_frozen_scope(directory, payload, digest)
     return tuple(payload["job_ids"])
 
 

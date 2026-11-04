@@ -579,12 +579,12 @@ def _pointer(
     )
     requirements = {}
     if request:
-        from pmmc.experiments.release_models import stage_aliases
+        from pmmc.experiments.release_models import stage_requirements
 
         # The native planner has just verified every private payload. Freeze
         # their alias projection once so read-only consumers need not rescan
         # tens of thousands of job files to validate an existing pointer.
-        path = _local(manifests / f"model-aliases-{selection.content_hash}.json", manifests)
+        path = _local(manifests / f"stage-requirements-{selection.content_hash}.json", manifests)
         identity = dict(
             campaign_id=campaign.campaign_id,
             selection_hash=selection.content_hash,
@@ -592,15 +592,22 @@ def _pointer(
             job_inventory_sha256=inventory_sha,
         )
         if planned:
-            aliases = stage_aliases(directory, campaign, selection.content_hash)
-            write_json(path, {**identity, "aliases": aliases}, immutable=True)
+            required = stage_requirements(directory, campaign, selection.content_hash)
+            write_json(path, {**identity, "requirements": required}, immutable=True)
         saved = json.loads(path.read_bytes())
-        requirements = saved.pop("aliases")
+        requirements = saved.pop("requirements")
         if saved != identity:
             raise ValueError("release_model_inventory_binding_mismatch")
     return {
         **(
-            {"release_plan_hash": digest, "model_aliases_by_stage": requirements}
+            {
+                "release_plan_hash": digest,
+                **requirements,
+                "gpu_stages": sorted(
+                    k for k, v in requirements["local_gpu_required_by_stage"].items() if v
+                ),
+                "local_gpu_required": any(requirements["local_gpu_required_by_stage"].values()),
+            }
             if digest is not None
             else {}
         ),
@@ -626,7 +633,10 @@ def _pointer(
         "runtime_sha256": sha256_file(root / config.runtime_profile),
         "execution_sha256": sha256_file(root / config.execution_profile),
         "capacity_calibration_required": not request
-        or any("answer-qwen3.5-27b" in aliases for aliases in requirements.values()),
+        or any(
+            "answer-qwen3.5-27b" in aliases
+            for aliases in requirements["calibration_aliases_by_stage"].values()
+        ),
         "gpu_benchmark_ready": False,
         "paper_result": False,
         "provider_calls": 0,
@@ -651,6 +661,8 @@ def prepare_exploration(settings: Settings, run_id: str, *, variant: str = "wr")
     request = plan_from_environment(os.environ)
     if request and (request["run_id"] != run_id or variant not in request["variants"]):
         raise ValueError("exploration_request_run_or_variant_mismatch")
+    if request and request["stage"] == "analysis" and not request["with_deps"]:
+        raise ValueError("source_analysis_cannot_plan_native_work_without_deps")
     config_path = _local(run / variant / "benchmark.yaml", run)
     pointer = config_path.parent / "pointer.json"
     with _lock(run / ".prepare.lock") as lock_fd:

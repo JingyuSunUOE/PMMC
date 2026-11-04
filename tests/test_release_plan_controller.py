@@ -91,6 +91,66 @@ def test_intent_hash_is_canonical_and_strict():
             normalize_plan({**base, **update})
 
 
+def test_budget_fence_uses_live_worker_without_host_run_lock(tmp_path, monkeypatch):
+    from scripts.release_host import budget_ops as ops
+    from scripts.release_host.runner import atomic
+
+    cfg = config(tmp_path)
+    root = tmp_path / "host"
+    plan = normalize_plan({"run_id": "demo"})
+    folder = root / "runs/demo"
+    private = root / "instances" / cfg["instance"]
+    folder.mkdir(parents=True)
+    private.mkdir(parents=True)
+    atomic(private / "identity.json", dict(deployment="instance", secrets={}))
+    atomic(
+        folder / "progress.json",
+        dict(status="running", batch={"control": {"state": "running", "job": "job-abc"}}),
+    )
+
+    class Backend:
+        kube = ["kubectl"]
+
+        def __init__(self, *args):
+            pass
+
+        def state(self, job):
+            return "running"
+
+    monkeypatch.setattr(ops, "Kubernetes", Backend)
+
+    def execute(argv):
+        assert argv[1] == "exec" and "stop-exploration-budget" in argv
+        return json.dumps(
+            dict(
+                plan_hash=plan_hash(plan),
+                approval_id="a" * 64,
+                new_calls_stopped=True,
+                settled_usd="2",
+                reserved_usd="0.1",
+            )
+        )
+
+    monkeypatch.setattr(ops, "invoke", execute)
+    assert (
+        ops.audit(
+            root,
+            cfg,
+            plan,
+            dict(
+                kind="stop-budget",
+                variant="wr",
+                approval_id="a" * 64,
+                selection_hash="b" * 64,
+                operator_id="test",
+                reason_code="operator_stop",
+            ),
+        )
+        == 0
+    )
+    assert json.loads((folder / "progress.json").read_text())["status"] == "running"
+
+
 def test_seal_is_stable_when_only_cumulative_ledger_changes(tmp_path):
     receipt = dict(
         campaign_id="c", selection_hash="s", scope_hash="h", stage="main", state="stage_complete"

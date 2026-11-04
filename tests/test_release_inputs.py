@@ -411,6 +411,51 @@ def test_invalid_owner_has_no_side_effect(tmp_path, name, variant):
     assert not list(tmp_path.iterdir())
 
 
+def test_closed_full_context_answer_can_plan_and_admit_control_without_gpu(project, monkeypatch):
+    from pmmc.experiments import release_execution
+    from pmmc.release_plan import normalize_plan
+    from pmmc.runtime.config import load_runtime_profile
+
+    plan = normalize_plan(
+        dict(
+            run_id="cpu-answer",
+            stage="baselines",
+            benchmarks=["memlens"],
+            methods=["full_context_captions"],
+            models=["answer-gpt-6-luna"],
+            components=["answer"],
+        )
+    )
+    monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps(plan))
+    monkeypatch.setenv(
+        "PMMC_RELEASE_TOPOLOGY",
+        json.dumps(
+            dict(gpus=0, workers=1, answer_tp=1, source_profile="configs/release/runtime.yaml")
+        ),
+    )
+    pointer = release.prepare_exploration(project, "cpu-answer")
+    assert pointer["local_gpu_required_by_stage"] == {"baselines": False}
+    config = release.load_benchmark_config(project.project_root / pointer["config_path"])
+    assert load_runtime_profile(project.resolve_path(config.runtime_profile)).metadata[
+        "release_planning_only"
+    ]
+    directory = project.project_root / pointer["campaign_dir"]
+
+    class CpuRegistered(Exception):
+        pass
+
+    def register(*args, **kwargs):
+        raise CpuRegistered()
+
+    monkeypatch.setattr(release_execution, "_register", register)
+    with pytest.raises(ValueError, match="requires_gpu_but_allocation_is_zero"):
+        release_execution.execute_stage(project, directory, "baselines", "gpu")
+    # Stop at the DB boundary. A closed/API answer is not silently replaced by
+    # a local model, and the unmeasured profile does not block the CPU worker.
+    with pytest.raises(CpuRegistered):
+        release_execution.execute_stage(project, directory, "baselines", "control")
+
+
 @pytest.mark.parametrize("benchmark,stage", [("memlens", "baselines"), ("memgallery", "main")])
 def test_native_subset_without_other_benchmark(project, monkeypatch, benchmark, stage):
     from pmmc.experiments.release_models import selected_release_model_aliases
@@ -448,3 +493,112 @@ def test_native_subset_without_other_benchmark(project, monkeypatch, benchmark, 
     monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps({**request, "components": []}))
     with pytest.raises(ValueError, match="request_changed"):
         release.prepare_exploration(project, "subset")
+
+
+@pytest.mark.parametrize("case", ["index", "coverage", "match", "all"])
+def test_prepare_all_matches_native_gpu_inventory(project, monkeypatch, case):
+    from scripts.release_host import cold_start
+
+    from pmmc.experiments.release_models import selected_release_model_aliases
+    from pmmc.experiments.step8_jobs import BenchmarkStageJob
+    from pmmc.experiments.step8_model_preparation import (
+        Step8ModelPreparationError,
+        prepare_step8_models,
+    )
+    from pmmc.infrastructure import settings as settings_module
+    from pmmc.release_plan import normalize_plan
+    from pmmc.schemas.step8 import ResourceClass
+
+    options = {
+        "index": dict(stage="baselines", methods=["full_context_captions"], components=["index"]),
+        "coverage": dict(stage="analysis", analyses=["coverage"], with_deps=True),
+        "match": dict(stage="main", models=["answer-qwen3.5-27b"], components=["match"]),
+        "all": dict(
+            stage="all",
+            methods=["contrastive_multimodal_rag"],
+            variants=["wr", "w"],
+            analyses=["coverage"],
+        ),
+    }[case]
+    request = normalize_plan(
+        {"run_id": case, "benchmarks": ["memlens"], "models": ["answer-gpt-6-luna"], **options}
+    )
+    monkeypatch.setenv("PMMC_RELEASE_REQUEST", json.dumps(request))
+    monkeypatch.setenv("PMMC_RELEASE_STAGE", "prepare-all")
+    if case == "index":
+        monkeypatch.setenv(
+            "PMMC_RELEASE_TOPOLOGY",
+            json.dumps(
+                dict(gpus=0, workers=1, answer_tp=1, source_profile="configs/release/runtime.yaml")
+            ),
+        )
+    pointers = {}
+    for arm in request["variants"]:
+        pointer = release.prepare_exploration(project, case, variant=arm)
+        pointers[arm] = pointer
+        directory = project.project_root / pointer["campaign_dir"]
+        jobs = [
+            BenchmarkStageJob.model_validate_json(p.read_bytes())
+            for p in (directory / "private/jobs").glob("*.json")
+        ]
+        assert jobs
+        expected = {
+            stage: any(
+                job.resource_class
+                in {ResourceClass.GPU_9B, ResourceClass.GPU_27B, ResourceClass.GPU_EMBEDDING}
+                for job in jobs
+                if stage in job.release_stages
+            )
+            for stage in {s for job in jobs for s in job.release_stages}
+        }
+        assert pointer["local_gpu_required_by_stage"] == expected
+        assert pointer["local_gpu_required"] is any(expected.values())
+        assert pointer["gpu_stages"] == sorted(s for s in expected if expected[s])
+        assert pointer["selected"] == {"memlens": 1}
+    config = release.load_benchmark_config(project.project_root / pointers["wr"]["config_path"])
+    if case == "all":
+        # Even with the anchor set to w, explicit prepare provisions wr's contrastive arm.
+        monkeypatch.setenv("PMMC_RELEASE_VARIANT", "w")
+    cached = selected_release_model_aliases(project, config)
+    calibration = selected_release_model_aliases(project, config, calibration=True)
+    assert set(calibration) <= set(cached)
+    assert "answer-gpt-6-luna" not in cached
+    if case == "index":
+        assert pointers["wr"]["gpu_stages"] == []
+        assert cached == calibration == []
+        settings = project.model_copy(
+            update={"model_cache_dir": project.project_root / "model-cache"}
+        )
+        report = prepare_step8_models(settings, config, allow_download=True)
+        assert report["ready"] and report["physical_snapshot_count"] == 0
+        assert report["local_model_aliases"] == []
+        monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+        monkeypatch.setenv("PMMC_STEP8_CONFIG", str(release._TEMPLATE))
+        executed = []
+        monkeypatch.setattr(cold_start.os, "execvp", lambda prog, args: executed.append(args))
+        cold_start.models(["python", "--config", str(release._TEMPLATE)])
+        assert not executed  # No Hub import, model fetch or heavyweight fallback CLI.
+        cold_start.gpu(["capacity-receipt"])
+        assert executed == [["capacity-receipt"]]
+        missing = config.model_copy(update={"model_lock": Path("missing.lock")})
+        with pytest.raises(Step8ModelPreparationError, match="release_requires_shipped_model_lock"):
+            prepare_step8_models(settings, missing, allow_download=True, create_lock=True)
+    elif case == "coverage":
+        assert pointers["wr"]["gpu_stages"] == ["main"]
+        assert calibration and "answer-qwen3.5-27b" not in calibration
+    elif case == "match":
+        assert "answer-qwen3.5-27b" in cached and "answer-qwen3.5-27b" not in calibration
+        assert not pointers["wr"]["capacity_calibration_required"]
+    else:
+        assert "siglip2-so400m-patch14-384" in calibration
+        assert pointers["wr"]["gpu_stages"] == ["baselines", "main"]
+        assert pointers["w"]["gpu_stages"] == ["main"]
+        monkeypatch.setenv("PMMC_RELEASE_STAGE", "main")
+        assert "siglip2-so400m-patch14-384" not in selected_release_model_aliases(project, config)
+        monkeypatch.setenv("PMMC_RELEASE_STAGE", "baselines")
+        with pytest.raises(ValueError, match="stage_outside_request"):
+            selected_release_model_aliases(project, config)
+        monkeypatch.setenv("PMMC_RELEASE_STAGE", "prepare-all")
+        (project.project_root / pointers["wr"]["pointer_path"]).unlink()
+        with pytest.raises(FileNotFoundError):
+            selected_release_model_aliases(project, config)

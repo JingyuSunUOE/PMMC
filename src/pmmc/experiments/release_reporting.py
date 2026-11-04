@@ -868,14 +868,24 @@ def _campaign_plan(campaign_dir: Path) -> dict | None:
     return plan
 
 
-def verify_release_budget_pointer(settings, *, run_id: str, variant: str, stage: ReleaseStage,
-                                  approval_id: str | None, rate_card_path: Path | None = None) -> None:
+def verify_release_budget_pointer(
+    settings,
+    *,
+    run_id: str,
+    variant: str,
+    stage: ReleaseStage,
+    approval_id: str | None,
+    rate_card_path: Path | None = None,
+) -> None:
     """Read-only host preflight. Reconstruct the ledger ID without DB privileges."""
     import os
 
     from pmmc.experiments.release_inputs import exploration_campaign_directory
     from pmmc.experiments.release_scope import read_scope
-    from pmmc.infrastructure.database.step8_repositories import validate_budget_policy
+    from pmmc.infrastructure.database.step8_repositories import (
+        plan_budget_identity,
+        validate_budget_policy,
+    )
     from pmmc.release_plan import plan_from_environment, plan_hash
 
     plan = plan_from_environment(os.environ)
@@ -892,24 +902,40 @@ def verify_release_budget_pointer(settings, *, run_id: str, variant: str, stage:
         return
     bindings, policy = {}, None
     for arm in plan["variants"]:
-        child = directory if arm == variant else exploration_campaign_directory(settings, run_id, variant=arm)
+        child = (
+            directory
+            if arm == variant
+            else exploration_campaign_directory(settings, run_id, variant=arm)
+        )
         cm, cs = (manifest, selection) if arm == variant else _identity(child)
         receipt = json.loads(_read(child, f"manifests/budget-{cs.content_hash}.json"))
         scopes = receipt["scope_hashes"]
-        if (_campaign_plan(child) != plan or receipt["plan_hash"] != digest
-                or receipt["approval_id"] != approval_id or receipt["campaign_id"] != cm.campaign_id
-                or receipt["selection_hash"] != cs.content_hash or set(scopes) != _plan_paid_stages(plan, arm)):
+        if (
+            _campaign_plan(child) != plan
+            or receipt["plan_hash"] != digest
+            or receipt["approval_id"] != approval_id
+            or receipt["campaign_id"] != cm.campaign_id
+            or receipt["selection_hash"] != cs.content_hash
+            or set(scopes) != _plan_paid_stages(plan, arm)
+        ):
             raise ValueError("release_budget_pointer_member_mismatch")
-        current = {k: receipt[k] for k in ("approver_id", "limit_usd", "rate_card_hash", "budget_mode")}
+        current = {
+            k: receipt[k] for k in ("approver_id", "limit_usd", "rate_card_hash", "budget_mode")
+        }
         if policy is not None and current != policy:
             raise ValueError("release_budget_pointer_policy_mismatch")
         policy = current
-        bindings[arm] = dict(campaign_id=cm.campaign_id, selection_hash=cs.content_hash,
-                             scopes=scopes, review_sha256=receipt["review_sha256"])
+        bindings[arm] = dict(
+            campaign_id=cm.campaign_id,
+            selection_hash=cs.content_hash,
+            scopes=scopes,
+            review_sha256=receipt["review_sha256"],
+        )
         if arm == variant:
             card = _read(child, f"manifests/rate-card-{cs.content_hash}.json")
-            if (hashlib.sha256(card).hexdigest() != current["rate_card_hash"]
-                    or (rate_card_path and sha256_file(rate_card_path) != current["rate_card_hash"])):
+            if hashlib.sha256(card).hexdigest() != current["rate_card_hash"] or (
+                rate_card_path and sha256_file(rate_card_path) != current["rate_card_hash"]
+            ):
                 raise ValueError("release_budget_pointer_rate_card_mismatch")
             read_scope(child, scopes[stage], cm.campaign_id, cs.content_hash)
             payload = json.loads(_read(child, f"private/scopes/{scopes[stage]}.json"))
@@ -919,17 +945,32 @@ def verify_release_budget_pointer(settings, *, run_id: str, variant: str, stage:
     amount = Decimal(policy["limit_usd"]) if policy["limit_usd"] is not None else None
     validate_budget_policy(amount, policy["budget_mode"] == "uncapped")
     anchor = bindings[plan["variants"][0]]
-    expected = dict(campaign_id=anchor["campaign_id"], selection_hash=anchor["selection_hash"],
-                    plan_bindings=bindings, plan_hash=digest, approver_id=policy["approver_id"],
-                    rate_card_hash=policy["rate_card_hash"],
-                    limit_usd=format(amount.normalize(), "f") if amount is not None else None)
-    if policy["budget_mode"] not in {"uncapped", "finite"} or canonical_content_hash(expected) != approval_id:
+    expected = plan_budget_identity(
+        campaign_id=anchor["campaign_id"],
+        selection_hash=anchor["selection_hash"],
+        plan_bindings=bindings,
+        plan_hash=digest,
+        approver_id=policy["approver_id"],
+        rate_card_hash=policy["rate_card_hash"],
+        limit_usd=amount,
+    )
+    if (
+        policy["budget_mode"] not in {"uncapped", "finite"}
+        or canonical_content_hash(expected) != approval_id
+    ):
         raise ValueError("release_budget_pointer_approval_identity_mismatch")
 
 
-async def stop_release_budget(settings, campaign_dir: Path, *, approval_id: str,
-                              expected_plan_hash: str, selection_hash: str,
-                              operator_id: str, reason_code: str) -> Row:
+async def stop_release_budget(
+    settings,
+    campaign_dir: Path,
+    *,
+    approval_id: str,
+    expected_plan_hash: str,
+    selection_hash: str,
+    operator_id: str,
+    reason_code: str,
+) -> Row:
     from pmmc.infrastructure.database.constants import DatabaseRole
     from pmmc.infrastructure.database.engine import create_session_factory
     from pmmc.infrastructure.database.step8_repositories import PostgresBenchmarkRepository
@@ -937,13 +978,22 @@ async def stop_release_budget(settings, campaign_dir: Path, *, approval_id: str,
 
     manifest, selection = _identity(campaign_dir)
     plan = _campaign_plan(campaign_dir)
-    if not plan or plan_hash(plan) != expected_plan_hash or selection_hash != selection.content_hash:
+    if (
+        not plan
+        or plan_hash(plan) != expected_plan_hash
+        or selection_hash != selection.content_hash
+    ):
         raise ValueError("release_budget_stop_plan_or_selection_mismatch")
     engine, sessions = create_session_factory(settings, DatabaseRole.RUNTIME)
     try:
         return await PostgresBenchmarkRepository(sessions).stop_plan_budget(
-            approval_id=approval_id, plan_hash=expected_plan_hash, campaign_id=manifest.campaign_id,
-            selection_hash=selection_hash, operator_id=operator_id, reason_code=reason_code)
+            approval_id=approval_id,
+            plan_hash=expected_plan_hash,
+            campaign_id=manifest.campaign_id,
+            selection_hash=selection_hash,
+            operator_id=operator_id,
+            reason_code=reason_code,
+        )
     finally:
         await engine.dispose()
 

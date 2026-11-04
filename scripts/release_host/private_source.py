@@ -4,6 +4,7 @@ import gzip
 import io
 import re
 import tarfile
+import zlib
 from pathlib import PurePosixPath
 
 if __package__ == "release_host":
@@ -20,19 +21,25 @@ MAX_MEMBERS = 4096
 IMAGE_LOCK = "deploy/release/images.lock.json"
 
 
-class PublicMember(tarfile.TarInfo):
-    @classmethod
-    def frombuf(cls, buf, encoding, errors):
-        member = super().frombuf(buf, encoding, errors)
-        # The public producer uses USTAR. Reject PAX, GNU sparse/longname,
-        # and link records *before* tarfile interprets any extension payload.
+def check_headers(raw):
+    # Verify the producer's physical USTAR records before tarfile can interpret
+    # GNU/PAX payloads. TarInfo subclass hooks vary between Python patch versions.
+    offset = 0
+    for _ in range(MAX_MEMBERS + 1):
+        block = raw[offset : offset + tarfile.BLOCKSIZE]
+        if block == bytes(tarfile.BLOCKSIZE):
+            return
+        member = tarfile.TarInfo.frombuf(block, "ascii", "strict")
         check(
             member.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
             and 0 <= member.size <= SOURCE_LIMIT
             and not member.linkname,
             "unsupported public archive record",
         )
-        return member
+        offset += tarfile.BLOCKSIZE * (
+            1 + (member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE
+        )
+    raise Error("oversized source archive")
 
 
 def safe_name(name):
@@ -62,7 +69,8 @@ def source_files(archive, expected_sha256):
             raw = archive
         check(len(raw) <= EXPANDED_LIMIT, "expanded source exceeds size limit")
         files, dirs, seen = {}, set(), set()
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:", tarinfo=PublicMember) as tar:
+        check_headers(raw)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
             for i, member in enumerate(tar):
                 check(i < MAX_MEMBERS, "oversized source archive")
                 if member.name in (".", "./") and member.isdir():
@@ -72,11 +80,23 @@ def source_files(archive, expected_sha256):
                 check(name not in seen, "duplicate source archive member")
                 seen.add(name)
                 check(member.mode & 0o7000 == 0, "unsafe archive mode")
+                check(
+                    not member.linkname and member.sparse is None,
+                    "unsupported public archive record",
+                )
                 if member.isdir():
                     check(member.size == 0, "directory with unexpected content")
                     dirs.add(name)
                     continue
-                with tar.extractfile(member) as stream:
+                # Never let tarfile follow a link or return a special-file stream.
+                check(
+                    member.type in (tarfile.REGTYPE, tarfile.AREGTYPE)
+                    and 0 <= member.size <= SOURCE_LIMIT,
+                    "unsupported public archive record",
+                )
+                stream = tar.extractfile(member)
+                check(stream is not None, "missing regular archive stream")
+                with stream:
                     data = stream.read()
                 check(
                     len(data) == member.size
@@ -87,7 +107,17 @@ def source_files(archive, expected_sha256):
             # tarfile otherwise accepts an appended second archive or a corrupt final header.
             tail = raw[tar.offset :]
             check(len(tail) >= 1024 and not tail.strip(b"\0"), "invalid public archive trailer")
-    except (tarfile.TarError, OSError, ValueError, EOFError, OverflowError, RecursionError):
+    except (
+        tarfile.TarError,
+        zlib.error,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        EOFError,
+        OverflowError,
+        RecursionError,
+    ):
         raise Error("invalid public source archive") from None
     manifests = [n for n in files if PurePosixPath(n).name == "SOURCE.sha256"]
     check(len(manifests) == 1, "expected one public SOURCE.sha256")

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +23,19 @@ from pmmc.infrastructure.settings import AppMode, Settings
 from pmmc.models.registry import load_model_registry
 from pmmc.schemas.base import DatasetName, JsonDict
 from pmmc.schemas.step8 import BenchmarkCampaignManifest, Step8BenchmarkConfig
+
+_PARENT_HASHES: ContextVar[tuple[str, dict[str, str]] | None] = ContextVar(
+    "selected_component_parent_hashes", default=None)
+
+
+@contextmanager
+def _selected_parents(job, upstream):
+    token = _PARENT_HASHES.set((job.job_id, upstream)) if job.release_stages else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            _PARENT_HASHES.reset(token)
 
 
 def _compiler_namespace(manifest: BenchmarkCampaignManifest) -> str | None:
@@ -187,28 +204,45 @@ class ProductionComponentBackend:
         except ValueError as error:
             raise ValueError("component_scientific_source_changed") from error
 
-    def _upstream(self, job: BenchmarkStageJob) -> list[ComponentReceipt]:
-        return [
-            ComponentReceipt.model_validate_json(
-                (self.campaign_dir / "checkpoints/components" / f"{key}.json").read_text()
-            )
-            for key in job.dependency_ids
-        ]
+    def _parent_roots(self, job, upstream=None):
+        if not job.release_stages:
+            return [(key, None) for key in job.dependency_ids]
+        if upstream is None:
+            binding = _PARENT_HASHES.get()
+            if binding is None or binding[0] != job.job_id:
+                raise ValueError("selected_component_parent_binding_missing")
+            upstream = binding[1]
+        if set(upstream) != set(job.dependency_ids) or any(
+            not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h) for h in upstream.values()
+        ):
+            raise ValueError("component_dependency_receipt_set_mismatch")
+        return [(key, upstream[key]) for key in job.dependency_ids]
 
-    def _parent_value(self, job: BenchmarkStageJob, key: str) -> Any:
+    def _parent_receipt(self, identity, expected):
+        if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise ValueError("invalid_component_parent_id")
+        receipt = ComponentReceipt.model_validate_json(
+            (self.campaign_dir / "checkpoints/components" / f"{identity}.json").read_bytes())
+        if expected is not None and (receipt.job_id != identity or receipt.content_hash != expected):
+            raise ValueError("selected_component_parent_receipt_changed")
+        return receipt
+
+    def _upstream(self, job: BenchmarkStageJob) -> list[ComponentReceipt]:
+        return [self._parent_receipt(k, h) for k, h in self._parent_roots(job)]
+
+    def _parent_value(self, job: BenchmarkStageJob, key: str, *, upstream=None) -> Any:
         seen = set()
-        queue = list(job.dependency_ids)
+        queue = deque(self._parent_roots(job, upstream))
         while queue:
-            identity = queue.pop(0)
+            identity, expected = queue.popleft()
             if identity in seen:
                 continue
             seen.add(identity)
-            receipt = ComponentReceipt.model_validate_json(
-                (self.campaign_dir / "checkpoints/components" / f"{identity}.json").read_text()
-            )
+            receipt = self._parent_receipt(identity, expected)
             if key in receipt.output:
                 return receipt.output[key]
-            queue.extend(receipt.upstream_receipt_hashes)
+            queue.extend((k, h if job.release_stages else None)
+                         for k, h in receipt.upstream_receipt_hashes.items())
         raise ValueError("required_component_parent_output_missing_" + key)
 
     def _compiler_configs(self, scope: dict[str, Any]):
@@ -238,7 +272,7 @@ class ProductionComponentBackend:
             raise ValueError("unregistered_production_component_operation")
         from pmmc.runtime.grounding import step8_prompt_scope
 
-        with step8_prompt_scope(self.settings.project_root):
+        with _selected_parents(job, upstream), step8_prompt_scope(self.settings.project_root):
             # An import-only scheduler subclass can replace _compiler. A completed
             # exploration producer still takes precedence over prefix adoption.
             result = None
@@ -282,10 +316,10 @@ class ProductionComponentBackend:
             from pmmc.evaluation.step8_workflow import verify_selected_score_recovery
             from pmmc.schemas import BaselineMethod
 
-            suite_id = self._parent_value(job, "suite_id")
+            suite_id = self._parent_value(job, "suite_id", upstream=upstream)
             standalone = job.operation == "baseline_evaluate"
             run_id = (baseline_suite_child_run_id(suite_id, BaselineMethod(job.parameters["method"]))
-                      if standalone else self._parent_value(job, "query_executor_run_id"))
+                      if standalone else self._parent_value(job, "query_executor_run_id", upstream=upstream))
             await verify_selected_score_recovery(
                 self.settings, receipt.output, campaign_id=self.campaign.campaign_id,
                 suite_id=suite_id, source_run_id=run_id, query_id=job.parameters["query_id"],

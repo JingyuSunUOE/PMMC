@@ -101,6 +101,16 @@ def execute_stage(settings: Settings, directory: Path, stage: ReleaseStage,
     selection = _latest_selection(directory)
     if manifest.phase is not CampaignPhase.EXPLORATION or selection.selection != "dev-all":
         raise ValueError("release_stage_requires_dev_all_not_paper")
+    from pmmc.runtime.config import load_runtime_profile
+
+    profile = load_runtime_profile(settings.resolve_path(config.runtime_profile))
+    cpu_only = profile.metadata.get("release_visible_gpus") == 0
+    if cpu_only:
+        from pmmc.experiments.release_models import stage_requirements
+
+        required = stage_requirements(directory, manifest, selection.content_hash)
+        if pool == "gpu" or required["local_gpu_required_by_stage"].get(stage) is not False:
+            raise ValueError("release_stage_requires_gpu_but_allocation_is_zero")
     approval, _ = asyncio.run(_register(directory, budget=None, rate_card=None,
                                         approver=None, retry=False))
     requested = os.getenv("PMMC_STEP8_BUDGET_APPROVAL_ID")
@@ -121,6 +131,9 @@ def execute_stage(settings: Settings, directory: Path, stage: ReleaseStage,
         if not all(job.release_stages for job in jobs):
             raise ValueError("release_stage_requires_selected_native_inventory")
     full_scope = stage_job_ids(jobs, stage, paid=True)
+    if cpu_only and any(job.job_id in full_scope and
+                        job.resource_class not in (ResourceClass.CPU, ResourceClass.API) for job in jobs):
+        raise ValueError("release_registered_scope_requires_gpu_but_allocation_is_zero")
     pending_paid = approval is None and (request is None or any(
         job.job_id in full_scope and job.resource_class == ResourceClass.API
         and statuses[job.job_id] != "completed" for job in jobs))

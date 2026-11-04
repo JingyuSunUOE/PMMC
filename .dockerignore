@@ -273,6 +273,7 @@ src/pmmc/infrastructure/database/**
 !docker/verify_source_contracts.py
 !docker/verify_step8_native_processor.py
 !docker/verify_step8_source_contracts.py
+!docs/extensions.md
 !docs/private-deploy.md
 !docs/release-benchmarks.md
 !docs/release-deploy.md
@@ -287,11 +288,13 @@ src/pmmc/infrastructure/database/**
 !prompts/runtime/pmmc_answer_with_evidence_v1.txt
 !pyproject.toml
 !scripts/__init__.py
+!scripts/ghcr_push_receipt.py
 !scripts/kind_persistence.py
 !scripts/pmmc
 !scripts/private_recovery.py
 !scripts/release_host/__init__.py
 !scripts/release_host/backends.py
+!scripts/release_host/budget_ops.py
 !scripts/release_host/cli.py
 !scripts/release_host/cold_start.py
 !scripts/release_host/config.py
@@ -617,6 +620,7 @@ src/pmmc/infrastructure/database/**
 !src/pmmc/qbank/__init__.py
 !src/pmmc/qbank/index.py
 !src/pmmc/qbank/matching.py
+!src/pmmc/release_asset_receipt.py
 !src/pmmc/release_plan.py
 !src/pmmc/retrieval/__init__.py
 !src/pmmc/retrieval/operators.py

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts import ghcr_push_receipt
 from scripts import kind_persistence as kind
 from scripts import release_images as images
 from scripts import release_source as source
@@ -262,6 +263,9 @@ def test_persistence_gate_observes_both_replacements(monkeypatch, fault):
                 }
             )
         elif args[0] == "exec":
+            if args[2:] in (("--", "id", "-u"), ("--", "id", "-g")):
+                assert args[1] in {f"{name}-0" for name in generations}
+                return "10001"
             cmd = args[-1]
             if "pg_isready" in cmd:
                 return ""
@@ -317,3 +321,54 @@ def test_publish_depends_on_storage_and_never_creates_git_release():
     assert "workflow_dispatch" in job["if"] and "publish_images" in job["if"]
     attest = [s for s in job["steps"] if "attest-build-provenance@" in s.get("uses", "")]
     assert attest and attest[0]["if"] == "inputs.publish_images"
+    dry = jobs["linux-image-check"]
+    assert dry["permissions"] == {"contents": "read"} and "!inputs.publish_images" in dry["if"]
+    steps = jobs["kind-storage"]["steps"]
+    (ledger,) = [
+        i for i, s in enumerate(steps) if "test_release_budget_postgres.py" in s.get("run", "")
+    ]
+    (persistence,) = [
+        i for i, s in enumerate(steps) if "scripts.kind_persistence" in s.get("run", "")
+    ]
+    assert persistence < ledger < len(steps) - 1
+    assert steps[ledger]["env"]["PMMC_TEST_DISPOSABLE_LEDGER"] == "kind"
+    assert steps[-1]["if"] == "always()"
+
+
+@pytest.mark.parametrize("fault", [None, "tag", "digest", "commit", "platform", "receipt"])
+def test_ghcr_receipt_binds_immutable_remote_bytes(monkeypatch, fault):
+    repo, revision, url = "ghcr.io/testing/app", "c" * 40, "https://github.com/testing/app"
+    tag = f"sha-{revision}-123-1"
+    manifest = b'{"schemaVersion":2}'
+    digest = "sha256:" + images.sha(manifest)
+    ref = f"{repo}@{digest}"
+    log = f"{tag}: digest: {digest} size: {len(manifest)}\n"
+    calls = []
+
+    def inspect(args, *, timeout):
+        calls.append(args)
+        if "--raw" in args:
+            wrong = {"tag": f"{repo}:{tag}", "digest": ref}.get(fault)
+            return b"other" if args[-1] == wrong else manifest
+        return json.dumps(
+            {
+                "os": "linux",
+                "architecture": "arm64" if fault == "platform" else "amd64",
+                "config": {
+                    "Labels": {
+                        "org.opencontainers.image.source": url,
+                        "org.opencontainers.image.revision": "" if fault == "commit" else revision,
+                    }
+                },
+            }
+        ).encode()
+
+    monkeypatch.setattr(ghcr_push_receipt.subprocess, "check_output", inspect)
+    if fault:
+        with pytest.raises(ValueError):
+            ghcr_push_receipt.pushed_ref(
+                repo, tag, "" if fault == "receipt" else log, revision, url
+            )
+    else:
+        assert ghcr_push_receipt.pushed_ref(repo, tag, log, revision, url) == ref
+        assert [c[-1] for c in calls] == [f"{repo}:{tag}", ref, ref]

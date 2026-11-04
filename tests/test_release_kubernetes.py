@@ -11,7 +11,7 @@ from scripts.release_host.backends import CREDENTIAL_UID, OWNER, Kubernetes
 from scripts.release_host.config import ROOT, Error, load_config
 from scripts.release_host.discovery import from_snapshot, pod_projection, projected_pods, requests
 from scripts.release_host.quota import peak
-from scripts.release_host.volume_layout import directory
+from scripts.release_host.volume_layout import directory, main as initialize_layout
 
 pytestmark = pytest.mark.usefixtures("installed_host_lock")
 
@@ -271,6 +271,18 @@ def test_discovery_fail_closed_and_read_only_phase(tmp_path, monkeypatch):
     assert not api.writes
 
 
+def test_minimal_manual_reports_do_not_reserve_inactive_services(tmp_path, monkeypatch):
+    config(tmp_path, overrides={"cpus": "1", "memory": "3Gi"})
+    path = tmp_path / "deploy.toml"
+    path.write_text(path.read_text().replace('discovery = "live"', 'discovery = "declared"'))
+    cfg = load_config(path, "kubernetes", resource_overrides={"cpus": "1", "memory": "3Gi"})
+    monkeypatch.setattr(backends, "invoke", lambda *_: pytest.fail("unexpected discovery"))
+    resolved = backends.resolve_kubernetes_resources(cfg, roles={"analysis-report"})
+    assert resolved["topology"] == {"gpus": 0, "answer_tp": 1, "cpus": 1, "memory_gib": 3}
+    with pytest.raises(Error, match="declared capacity"):
+        backends.resolve_kubernetes_resources(cfg, roles={"gpu", "control"})
+
+
 def test_selectors_and_tolerations_match_rendering(tmp_path):
     cfg = config(
         tmp_path,
@@ -317,15 +329,29 @@ def test_managed_shared_claim_and_layout_once(tmp_path, monkeypatch):
     (layout,) = [obj for (k, _), obj in api.objects.items() if k == "Job"]
     pod = layout["spec"]["template"]["spec"]
     assert not pod["automountServiceAccountToken"]
-    for c in (*pod["initContainers"], *pod["containers"]):
+    assert "initContainers" not in pod
+    for c in pod["containers"]:
         assert c["env"] == [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"}]
     assert pod["containers"][0]["securityContext"]["runAsUser"] == cfg["identity"]["uid"]
     for obj in (
         layout,
         b.service_objects("minio")[-1],
+        b.service_objects("postgres")[-1],
         b.manifest("trial", "assets", "trial", "main"),
+        b.manifest("trial", "analysis-report", "trial", "main"),
     ):
-        assert obj["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "mirror-pull"}]
+        pod = obj["spec"]["template"]["spec"]
+        assert pod["imagePullSecrets"] == [{"name": "mirror-pull"}]
+        assert pod["securityContext"] == {
+            "runAsUser": cfg["identity"]["uid"],
+            "runAsGroup": cfg["identity"]["gid"],
+            "runAsNonRoot": True,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }
+        for c in (*pod.get("initContainers", []), *pod["containers"]):
+            sc = c["securityContext"]
+            assert sc.get("runAsUser", cfg["identity"]["uid"]) == cfg["identity"]["uid"]
+            assert not sc["allowPrivilegeEscalation"] and sc["capabilities"] == {"drop": ["ALL"]}
     api.writes.clear()
     b.reconcile()
     assert not any(k in ("Job", "Secret", "PersistentVolumeClaim") for k, _ in api.writes)
@@ -336,21 +362,22 @@ def test_managed_shared_claim_and_layout_once(tmp_path, monkeypatch):
     assert not api.writes
 
 
-def test_layout_no_follow_no_recursive_repair(tmp_path):
+def test_layout_no_follow_no_recursive_repair(tmp_path, monkeypatch):
     relative = "release/outputs"
-    owner = (os.getuid(), os.getgid())
-    directory(tmp_path, relative, create=True, owner=owner)
+    directory(tmp_path, relative)
     leaf = tmp_path / relative
     marker = leaf / "keep"
     marker.write_bytes(b"unchanged")
     marker.chmod(0o400)
-    directory(tmp_path, relative, create=True, owner=owner)
+    directory(tmp_path, relative)
     assert marker.read_bytes() == b"unchanged" and marker.stat().st_mode & 0o777 == 0o400
-    with pytest.raises(PermissionError):
-        directory(tmp_path, relative, create=True, owner=(owner[0] + 1, owner[1]))
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    for mode in ("create", "report"):
+        with pytest.raises(PermissionError, match="non-root"):
+            initialize_layout([mode, "10001", "10001", "unused"])
     (leaf / "symlink").symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(OSError):
-        directory(tmp_path, relative + "/symlink/new", create=True)
+        directory(tmp_path, relative + "/symlink/new")
     assert not (tmp_path / "new").exists()
 
 
@@ -393,6 +420,77 @@ def test_read_only_inventory_projection_accounts_for_in_place_resize():
         projected_pods(row[:-1])
 
 
+def test_planning_fallback_only_for_gpu_absence(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    roles = {"assets", "prepare", "models", "control", "gpu"}
+    nodes = [node("cpu", 0)]
+    calls = []
+
+    def read(cmd):
+        calls.append(cmd)
+        if "nodes" in cmd:
+            return json.dumps({"items": nodes})
+        if "resourcequota" in cmd:
+            return '{"items":[]}'
+        assert "pods" in cmd
+        return ""
+
+    monkeypatch.setattr(backends, "invoke", read)
+    resolve = backends.resolve_planning_resources
+    with pytest.raises(Error, match="no available single-node GPU"):
+        resolve(cfg, roles=roles)
+    calls.clear()
+    cpu = resolve(cfg, roles=roles, allow_cpu_fallback=True)
+    assert len(calls) == 3  # Retry uses the same observation, never another live inventory.
+    assert cpu["resource_policy"]["cpu_planning_only"] is True and cpu["topology"]["gpus"] == 0
+    b = adapter(cpu)
+    for role in ("gpu", "prepare-capacity"):
+        with pytest.raises(Error, match="GPU"):
+            b.manifest("job", role, "trial", "main")
+    assert (
+        "nvidia.com/gpu"
+        not in b.manifest("job", "control", "trial", "main")["spec"]["template"]["spec"][
+            "containers"
+        ][0]["resources"]["requests"]
+    )
+    nodes[:] = [node("worker", 1)]
+    gpu = resolve(cfg, roles=roles, allow_cpu_fallback=True)
+    assert gpu["topology"]["gpus"] == 1 and not gpu["resource_policy"].get("cpu_planning_only")
+    with pytest.raises(Error, match="exceeds declared single-node capacity"):
+        resolve(config(tmp_path, overrides={"gpus": 2}), roles=roles, allow_cpu_fallback=True)
+    nodes.clear()
+    with pytest.raises(Error, match="no ready schedulable Linux node"):
+        resolve(cfg, roles=roles, allow_cpu_fallback=True)
+    monkeypatch.setattr(backends, "invoke", lambda _: (_ for _ in ()).throw(Error("denied")))
+    with pytest.raises(Error, match="grant read-only discovery"):
+        resolve(cfg, roles=roles, allow_cpu_fallback=True)
+
+
+def test_declared_zero_gpu_plan(tmp_path):
+    config(tmp_path, gpus=0)
+    path = tmp_path / "deploy.toml"
+    path.write_text(path.read_text().replace('discovery = "live"', 'discovery = "declared"'))
+    cfg = load_config(path, "kubernetes")
+    with pytest.raises(Error, match="does not permit a GPU"):
+        backends.resolve_planning_resources(cfg)
+    assert (
+        backends.resolve_planning_resources(cfg, allow_cpu_fallback=True)["topology"]["gpus"] == 0
+    )
+
+
+def test_control_admission_does_not_require_a_gpu_peer(tmp_path, monkeypatch):
+    b = adapter(config(tmp_path))
+    hard = {"requests.nvidia.com/gpu":"0"}
+    def read(cmd):
+        quotas = [{"spec":{"hard":hard}, "status":{"hard":hard,"used":hard}}]
+        return json.dumps({"items":quotas if "resourcequota" in cmd else []})
+    monkeypatch.setattr(backends, "invoke", read)
+    b.check_quota(roles=("control",))
+    assert b.quota["peak"]["nvidia.com/gpu"] == 0
+    with pytest.raises(Error, match="insufficient namespace quota"):
+        b.check_quota(roles=("gpu",))
+
+
 def test_private_rate_files_are_role_scoped_without_authorizing(tmp_path):
     config(tmp_path)
     file = tmp_path / "deploy.toml"
@@ -428,7 +526,7 @@ def test_private_rate_files_are_role_scoped_without_authorizing(tmp_path):
         pod = job["spec"]["template"]["spec"]
         c = pod["containers"][0]
         mounts = {m["mountPath"]: m for m in c["volumeMounts"] if m["name"] == "rates"}
-        rate_users = role in ("quote", "approve", "control")
+        rate_users = role in ("quote", "approve")
         assert bool(mounts) == rate_users
         if rate_users:
             (vol,) = [v for v in pod["volumes"] if v["name"] == "rates"]
@@ -449,6 +547,8 @@ def test_private_rate_files_are_role_scoped_without_authorizing(tmp_path):
             for e in c["env"]
         )
     b.approval = "a" * 64
+    paid = b.manifest("trial", "control", "trial", "main")["spec"]["template"]["spec"]
+    assert {v["name"] for v in paid["volumes"]} >= {"rates"}
     for role in ("pointer", "gpu"):
         c = b.manifest("trial", role, "trial", "main")["spec"]["template"]["spec"]["containers"][0]
         assert "PMMC_STEP8_RATE_CARD_PATH" not in {e["name"] for e in c["env"]}
@@ -458,3 +558,23 @@ def test_private_rate_files_are_role_scoped_without_authorizing(tmp_path):
     file.write_text(enabled.replace("[native]", '[native]\nrate_card = "/pmmc-inputs/different"'))
     with pytest.raises(Error, match="native.rate_card"):
         load_config(file, "kubernetes")
+
+
+def test_open_control_submits_without_private_billing_or_provider_secrets(tmp_path, monkeypatch):
+    b = adapter(config(tmp_path))
+    b.cfg["billing"]["policy_secret"] = True
+    b.creds = {}
+    submitted = []
+    def invoke(argv, document=None, **kwargs):
+        if "get" in argv:
+            assert "secret" not in argv
+            return '{"items":[]}'
+        assert "create" in argv
+        submitted.append(document)
+    monkeypatch.setattr(backends, "invoke", invoke)
+    b.start("trial", "control", "trial", "main")
+    (job,) = submitted
+    pod = job["spec"]["template"]["spec"]
+    assert "rates" not in {v["name"] for v in pod["volumes"]}
+    assert not {"OPENAI_API_KEY","ANTHROPIC_API_KEY","PMMC_STEP8_RATE_CARD_PATH",
+                "PMMC_STEP8_BUDGET_APPROVAL_ID"}.intersection(e["name"] for e in pod["containers"][0]["env"])

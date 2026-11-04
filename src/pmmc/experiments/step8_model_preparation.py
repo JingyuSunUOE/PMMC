@@ -161,6 +161,8 @@ def prepare_step8_models(
         )
         phase = "lock"
         if not os.path.lexists(lock_path):
+            if "PMMC_RELEASE_REQUEST" in os.environ:
+                raise _PreparationFailure("release_requires_shipped_model_lock")
             if not create_lock:
                 raise _PreparationFailure("model_lock_missing_create_not_authorized")
             if not allow_download:
@@ -172,7 +174,7 @@ def prepare_step8_models(
             if os.path.lexists(lock_path):
                 report["lock_state"] = "reused"
             else:
-                if not create_lock or not allow_download:
+                if "PMMC_RELEASE_REQUEST" in os.environ or not create_lock or not allow_download:
                     raise _PreparationFailure("model_lock_disappeared_during_preparation")
                 token = settings.hf_token.get_secret_value() if settings.hf_token else None
                 candidate = build_model_lock(registry, aliases=aliases, token=token)
@@ -208,7 +210,7 @@ def prepare_step8_models(
             phase = "full_verification"
             token = (
                 settings.hf_token.get_secret_value()
-                if allow_download and settings.hf_token
+                if open_aliases and allow_download and settings.hf_token
                 else None
             )
             full = prepare_model_cache_audited(

@@ -207,7 +207,12 @@ class Simulated:
                 "run_id": self.current_run,
                 "variant": self.req["variant"],
                 "selection_hash": HASH,
+                "release_plan_hash":plan_hash(self.req["plan"]),
+                "selected":dict.fromkeys(self.req["plan"]["benchmarks"],2),
+                "gpu_stages":["main","baselines"],"plan_needs_gpu":True,
             }
+        if role=="assets":
+            return dict(plan_hash=plan_hash(self.req["plan"]), benchmarks=self.req["plan"]["benchmarks"])
         return "complete"
 
     def stop(self, job):
@@ -605,10 +610,11 @@ def test_readonly_preflight_rejects_other_variant_budget(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.delenv("PMMC_STEP8_RATE_CARD_PATH", raising=False)
+    monkeypatch.delenv("PMMC_RELEASE_REQUEST", raising=False)
     monkeypatch.setenv("PMMC_STEP8_BUDGET_APPROVAL_ID", HASH)
-    monkeypatch.setattr(sys, "argv", ["python", "trial", "wr"])
+    monkeypatch.setattr(sys, "argv", ["python", "trial", "wr", "main"])
     exec(VERIFY_POINTER, {})
-    monkeypatch.setattr(sys, "argv", ["python", "trial", "w"])
+    monkeypatch.setattr(sys, "argv", ["python", "trial", "w", "main"])
     with pytest.raises(SystemExit, match="mismatch"):
         exec(VERIFY_POINTER, {})
 

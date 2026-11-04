@@ -344,29 +344,44 @@ def test_recovered_worker_rejects_output_not_bound_to_original_blob(tmp_path):
     from test_step8_campaign import FakeRepository
 
     _, _, jobs = selected(tmp_path, stage="baselines", methods=["full_context_captions"])
-    snapshot, = (j for j in jobs if j.operation == "snapshot")
+    (snapshot,) = (j for j in jobs if j.operation == "snapshot")
     db = FakeRepository(snapshot)
     store = CampaignArtifactStore(tmp_path)
-    original = {"snapshot_id":"snapshot"}
-    backend = SimpleNamespace(preflight=AsyncMock(), execute=AsyncMock(return_value=(
-        original, [store.put_json(original)], {"component_outputs":1})))
+    original = {"snapshot_id": "snapshot"}
+    backend = SimpleNamespace(
+        preflight=AsyncMock(),
+        execute=AsyncMock(
+            return_value=(original, [store.put_json(original)], {"component_outputs": 1})
+        ),
+    )
 
     def run():
-        return asyncio.run(CampaignWorker(
-            repository=db, backend=backend, campaign_id=snapshot.campaign_id, campaign_dir=tmp_path,
-            resource=snapshot.resource_class, execution=Step8ExecutionConfig(cpu_workers=1),
-            execution_image="fixture", artifact_store=store, event=lambda _:None).run())
+        return asyncio.run(
+            CampaignWorker(
+                repository=db,
+                backend=backend,
+                campaign_id=snapshot.campaign_id,
+                campaign_dir=tmp_path,
+                resource=snapshot.resource_class,
+                execution=Step8ExecutionConfig(cpu_workers=1),
+                execution_image="fixture",
+                artifact_store=store,
+                event=lambda _: None,
+            ).run()
+        )
 
     assert run()["completed_this_attempt"] == 1
     db.state = "pending"
     assert run()["reused"] == 1
-    path = tmp_path/"checkpoints/components"/f"{snapshot.job_id}.json"
+    path = tmp_path / "checkpoints/components" / f"{snapshot.job_id}.json"
     saved = json.loads(path.read_bytes())
-    write_json(path, {**saved,"output":{"snapshot_id":"different"}})
+    write_json(path, {**saved, "output": {"snapshot_id": "different"}})
     db.state = "pending"
     with pytest.raises(ExceptionGroup) as errors:
         run()
-    assert any(isinstance(exc, ValueError) and str(exc) == "incompatible_component_recovery_receipt"
-               for exc in errors.value.exceptions)
+    assert any(
+        isinstance(exc, ValueError) and str(exc) == "incompatible_component_recovery_receipt"
+        for exc in errors.value.exceptions
+    )
     assert db.state == "failed"
     backend.execute.assert_awaited_once()

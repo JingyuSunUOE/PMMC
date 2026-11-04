@@ -27,6 +27,13 @@ from pathlib import Path
 from pmmc.infrastructure.settings import get_settings
 from pmmc.experiments.release_inputs import exploration_campaign_directory
 settings = get_settings()
+if os.environ.get("PMMC_RELEASE_REQUEST"):
+    from pmmc.experiments.release_reporting import verify_release_budget_pointer
+    rate = os.environ.get("PMMC_STEP8_RATE_CARD_PATH")
+    verify_release_budget_pointer(settings, run_id=sys.argv[1], variant=sys.argv[2],
+        stage=sys.argv[3], approval_id=os.getenv("PMMC_STEP8_BUDGET_APPROVAL_ID"),
+        rate_card_path=Path(rate) if rate else None)
+    sys.exit(0)
 directory = exploration_campaign_directory(settings, sys.argv[1], variant=sys.argv[2])
 pointer = settings.outputs_path / "step8/exploration" / sys.argv[1] / sys.argv[2] / "pointer.json"
 selection = json.loads(pointer.read_bytes())["selection_hash"]
@@ -74,7 +81,7 @@ def secret_refs(role, cfg, approval, plan=None):
     if role == "minio":
         return dict(zip(("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"), ROOT_KEYS, strict=True))
     keys = list(WORKER) if role in ("bootstrap", "control", *GPU_ROLES, "prepare-capacity") else []
-    if role in ("quote", "approve"):
+    if role in ("quote", "approve", "stop-budget", "spend"):
         keys.append(WORKER[0])
     if role in ("bootstrap", "control"):
         keys.append(ADMIN)
@@ -187,6 +194,24 @@ def command(role, cfg, run, stage, request=None):
         return ["python", "-m", "pmmc.experiments.release_assets"]
     if role == "analysis-report":
         return ["python", "-m", "pmmc.experiments.release_readouts"]
+    if role in ("spend", "stop-budget"):
+        if role == "spend":
+            return [*BENCH, "spend-exploration", *select]
+        return [
+            *BENCH,
+            "stop-exploration-budget",
+            *select,
+            "--approval-id",
+            request["approval_id"],
+            "--plan-hash",
+            request["plan_hash"],
+            "--selection-hash",
+            request["selection_hash"],
+            "--operator-id",
+            request["operator_id"],
+            "--reason-code",
+            request["reason_code"],
+        ]
     if role == "prepare-capacity":
         return cold(
             "gpu", ["python", "-c", 'print(\'{"protocol":"release-capacity-v2","ready":true}\')']
@@ -234,7 +259,7 @@ def command(role, cfg, run, stage, request=None):
             *(["--uncapped"] if request.get("uncapped") else ["--limit-usd", request["limit_usd"]]),
         ]
     if role == "pointer":
-        return ["python", "-c", VERIFY_POINTER, run, variant]
+        return ["python", "-c", VERIFY_POINTER, run, variant, stage]
     argv = [
         *BENCH,
         "run-exploration",
